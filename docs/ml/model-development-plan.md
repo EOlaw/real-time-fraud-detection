@@ -1,7 +1,9 @@
 # Model development plan
 
-Items marked ✅ are implemented and were executed for model `card-fraud-xgb@1.0.0`
-([model card](model-card-card-fraud-xgb-1.0.0.md)); ⏳ are planned for Phase 3/9.
+Items marked ✅ are implemented and were executed: Phase 1 for `card-fraud-xgb@1.0.0`
+([model card](model-card-card-fraud-xgb-1.0.0.md)) and Phase 3 for the candidate
+`card-fraud-xgb@1.1.0` ([model card](model-card-card-fraud-xgb-1.1.0.md),
+[experiment](phase3-experiment.md)). Items marked ⏳ are planned.
 
 ## 1. Features (spec `card-v1`) ✅
 
@@ -55,12 +57,16 @@ metrics) while it does change the reported test metrics.
 | Random forest | `class_weight=balanced_subsample`, native NaN | ✅ |
 | XGBoost | none (keeps probabilities calibrated) | ✅ |
 | XGBoost weighted | `scale_pos_weight = neg/pos` | ✅ (to test, not assume, reweighting) |
-| LightGBM | — | ⏳ only if XGBoost tuning plateaus; it would be a near-duplicate otherwise |
-| Under/oversampling, SMOTE | Inside training folds only, never before splitting | ⏳ Phase 3 comparison; the class-weight experiment already showed no meaningful AP gain |
-| Isolation Forest / robust z-scores | Separate unsupervised *anomaly* score, never mixed into P(fraud) | ⏳ Phase 3 (behavioral analytics) |
-| Optuna tuning | Time-series CV within train only; test untouched | ⏳ Phase 3 |
+| LightGBM | — | ⏳ not justified: tuned XGBoost improved test AP by only +0.005, so a near-duplicate GBDT is unlikely to change conclusions |
+| Random undersampling 1:10, SMOTE-NC 1:10 | Applied to fold-train rows only; SMOTE-NC on primitive features with derived features recomputed | ✅ Phase 3: both **worse** than no resampling (validation AP −0.0044 and −0.0082 vs incumbent, paired CIs exclude 0) and worse calibrated |
+| Class weighting (tuned) | `scale_pos_weight = neg/pos` | ✅ Phase 3: AP tie, Brier 2.4× worse |
+| Isolation Forest | Separate unsupervised *anomaly* score, never mixed into P(fraud) | ✅ Phase 3: test AP 0.067 standalone, adds 0.0000 AP on top of the model |
+| Optuna tuning | 3 expanding folds inside train, 7-day embargo, TPE seed 42, 30 trials, incumbent as trial 0 | ✅ Phase 3: CV AP 0.9677 → 0.9714 |
 
 ## 4. Selection rule ✅
+
+Phase 3 reuses this rule unchanged (`select_model(..., candidates=...)`), with the incumbent
+artifact as a candidate. Under it, 1.1.0 was selected by the Brier tie-break.
 
 Highest **validation average precision** among servable candidates; candidates within **0.005 AP**
 are considered tied and the tie goes to the lower **validation Brier score**. Rationale: risk bands

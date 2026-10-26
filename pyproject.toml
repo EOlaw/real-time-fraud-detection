@@ -25,6 +25,9 @@ dependencies = [
     "argon2-cffi>=23.1",
     "structlog>=24.4",
     "pyyaml>=6.0",
+    "optuna>=4.2",
+    "imbalanced-learn>=0.13",
+    "mlflow>=3.0",
 ]
 
 [dependency-groups]

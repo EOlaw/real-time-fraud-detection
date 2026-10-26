@@ -21,6 +21,10 @@ and tested, and what a regulated deployment would additionally require.
 | Secrets | Only from environment/`.env` (git-ignored); weak or placeholder JWT secret refused at startup; no credentials in code or compose file | `Settings` validator |
 | Container | Non-root user (uid 10001); model mounted read-only; ports bound to 127.0.0.1 locally | verified with `docker compose exec api id` |
 | Sandbox decisions | Policy schema only accepts `mode: sandbox`; no money movement integration | `test_only_sandbox_mode_is_supported` |
+| Experiment tracking hygiene | MLflow receives only config, versions, hashes and aggregate metrics; `tracking.guard` rejects customer tokens, 32-hex event ids and secret env values; per-transaction explanations stay in the git-ignored artifact dir | `test_tracker_records_contain_no_transaction_data_or_secrets`, `test_guard_rejects_sensitive_values`, `test_mlflow_tracking_end_to_end` (scans the on-disk store) |
+| Explanation output | Per-transaction SHAP shows model inputs only; identifier columns are refused | `test_explanations_refuse_identifiers` |
+| Anomaly score isolation | Unsupervised score is a separate type; the decision policy only accepts a probability float; never stored in model artifacts or policies | `test_anomaly_score_cannot_reach_the_decision_policy_or_model` |
+| Gated promotion | Candidate models are never auto-promoted; `promote-model` checks artifact hash/contract, policy binding, threshold provenance and online/offline parity before `--apply`, and archives the previous policy | `test_promotion_gates_pass_and_apply_is_reversible`, `test_promotion_gates_fail_on_mismatch` |
 
 ## Not yet implemented (required before any real deployment)
 

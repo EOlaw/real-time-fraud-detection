@@ -1,0 +1,68 @@
+# Phase 3 experiment for the card-payments domain (feature spec card-v1).
+# Baseline / incumbent: card-fraud-xgb@1.0.0. A new version is produced only if it wins selection
+# on the validation window; it is never promoted automatically.
+model_name: card-fraud-xgb
+candidate_version: 1.1.0
+seed: 42
+baseline_artifact: ml/artifacts/card-fraud-xgb-1.0.0
+policy_out_dir: ml/configs/policies
+
+# Same windows as Phase 1 (train_card_v1.yaml). Test = published fraudTest.csv window.
+splits:
+  warmup_end: "2019-02-01T00:00:00Z"
+  train_end: "2020-03-01T00:00:00Z"
+  validation_end: "2020-06-21T12:14:00Z"
+
+# Expanding-window CV strictly inside the training window: 3 folds with 2-month validation
+# blocks. Training rows within 7 days before each block are dropped (embargo) so a fraud burst
+# that straddles a boundary cannot leak its own labels into fold-train.
+cv:
+  boundaries:
+    - "2019-09-01T00:00:00Z"
+    - "2019-11-01T00:00:00Z"
+    - "2020-01-01T00:00:00Z"
+    - "2020-03-01T00:00:00Z"
+  embargo_days: 7
+
+tuning:
+  n_trials: 30
+  sampler_seed: 42
+  pruner_startup_trials: 5
+  # Every incumbent value (500, 0.05, 6, 1.0, 0.8, 0.8, 1.0) lies inside this space; the
+  # incumbent is enqueued as trial 0.
+  search_space:
+    n_estimators: {type: int, low: 200, high: 1000, step: 100}
+    learning_rate: {type: float, low: 0.02, high: 0.2, log: true}
+    max_depth: {type: int, low: 3, high: 10}
+    min_child_weight: {type: float, low: 1.0, high: 20.0, log: true}
+    subsample: {type: float, low: 0.6, high: 1.0}
+    colsample_bytree: {type: float, low: 0.5, high: 1.0}
+    reg_lambda: {type: float, low: 0.1, high: 10.0, log: true}
+
+imbalance:
+  undersample_ratio: 0.1   # majority kept so that positives:negatives = 1:10
+  smote_ratio: 0.1         # synthetic positives until positives:negatives = 1:10
+  smote_k_neighbors: 5
+
+evaluation:
+  review_capacity_fraction: 0.005
+  alert_rates: [0.001, 0.0025, 0.005, 0.01, 0.02]
+  threshold_fbeta: 2.0
+  bootstrap_resamples: 200
+  selection_ap_tolerance: 0.005
+
+explain:
+  global_sample_rows: 20000
+  examples_per_kind: 2
+
+anomaly:
+  enabled: true
+  n_estimators: 200
+  max_samples: 256
+  fit_sample_rows: 200000
+
+mlflow:
+  enabled: true
+  tracking_uri: sqlite:///ml/mlruns/mlflow.db
+  experiment: card-fraud-phase3
+  artifact_root: ml/mlruns/artifacts

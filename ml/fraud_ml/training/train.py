@@ -18,6 +18,7 @@ import json
 import platform
 import subprocess
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -139,11 +140,15 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def select_model(validation: dict[str, Any], ap_tolerance: float) -> str:
-    """Best servable validation AP; near-ties (within tolerance) go to the lowest Brier score."""
-    best_ap = max(validation[n]["average_precision"] for n in SERVABLE)
-    tied = [n for n in SERVABLE if validation[n]["average_precision"] >= best_ap - ap_tolerance]
-    return min(sorted(tied), key=lambda n: validation[n]["brier"])
+def select_model(
+    validation: dict[str, Any], ap_tolerance: float, candidates: Iterable[str] = SERVABLE
+) -> str:
+    """Best validation AP among ``candidates``; near-ties (within tolerance) go to the lowest
+    validation Brier score; remaining exact ties go to the alphabetically first name."""
+    names = sorted(candidates)
+    best_ap = max(validation[n]["average_precision"] for n in names)
+    tied = [n for n in names if validation[n]["average_precision"] >= best_ap - ap_tolerance]
+    return min(tied, key=lambda n: validation[n]["brier"])
 
 
 def split_masks(events: pd.DataFrame, s: SplitConfig) -> dict[str, npt.NDArray[np.bool_]]:

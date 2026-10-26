@@ -16,6 +16,16 @@ unscored events labeled with ``--source``. It is idempotent (re-running reports 
 same 30-day lookback the offline features had.
 
 Exit status: 0 on success, 1 when the import is refused or rolled back (nothing written).
+
+    uv run python -m fraud_api.cli promote-model \
+        --artifact ml/artifacts/card-fraud-xgb-1.1.0 \
+        --policy ml/configs/policies/card-fraud-xgb-1.1.0.yaml [--apply]
+
+``promote-model`` runs the promotion gates (artifact hash/contract, policy bound to the model,
+threshold provenance, online/offline parity on real events, decisions). Without ``--apply`` it
+changes nothing. With ``--apply`` and all gates passing it repoints ``ml/artifacts/current`` and
+replaces ``ml/configs/decision_policy.yaml`` (previous policy archived for rollback). Exit 1 if
+any gate fails.
 """
 
 from __future__ import annotations
@@ -74,7 +84,39 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--end", type=datetime.fromisoformat, required=True)
     p.add_argument("--statement-timeout-s", type=int, default=600)
     p.set_defaults(source="backfill")
+    p = sub.add_parser("promote-model", help="run promotion gates (and --apply to promote)")
+    p.add_argument("--artifact", type=Path, required=True)
+    p.add_argument("--policy", type=Path, required=True)
+    p.add_argument("--data", type=Path, default=Path("ml/data/processed/card_transactions.parquet"))
+    p.add_argument("--parity-sample", type=int, default=500)
+    p.add_argument("--current-link", type=Path, default=Path("ml/artifacts/current"))
+    p.add_argument("--active-policy", type=Path, default=Path("ml/configs/decision_policy.yaml"))
+    p.add_argument("--archive-dir", type=Path, default=Path("ml/configs/policies"))
+    p.add_argument("--apply", action="store_true", help="promote if every gate passes")
     args = parser.parse_args(argv)
+
+    if args.cmd == "promote-model":  # needs no database
+        from fraud_api.promotion import apply_promotion, check_promotion
+
+        gates = check_promotion(args.artifact, args.policy, args.data, args.parity_sample)
+        for g in gates:
+            print(f"[{'PASS' if g.passed else 'FAIL'}] {g.name}: {g.detail}")
+        if not all(g.passed for g in gates) or len(gates) < 5:
+            print("promotion gates failed; nothing changed", file=sys.stderr)
+            sys.exit(1)
+        if args.apply:
+            print(
+                apply_promotion(
+                    args.artifact,
+                    args.policy,
+                    args.current_link,
+                    args.active_policy,
+                    args.archive_dir,
+                )
+            )
+        else:
+            print("all gates passed; nothing changed (re-run with --apply to promote)")
+        return
 
     factory = make_session_factory(make_engine(get_settings()))
     with factory() as session:

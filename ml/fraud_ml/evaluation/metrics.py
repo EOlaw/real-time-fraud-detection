@@ -158,3 +158,37 @@ def ranking_metrics(y: IntArray, score: FloatArray) -> dict[str, float]:
         "n": float(len(y)),
         "positives": float(y.sum()),
     }
+
+
+def paired_cluster_bootstrap_diff(
+    y: IntArray,
+    score_a: FloatArray,
+    score_b: FloatArray,
+    groups: npt.NDArray[Any],
+    metric: Callable[[IntArray, FloatArray], float],
+    n_resamples: int = 200,
+    seed: int = 0,
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """CI for ``metric(a) - metric(b)`` using the *same* customer resamples for both models, so the
+    interval reflects the difference rather than two independent noise levels."""
+    rng = np.random.default_rng(seed)
+    codes = np.unique(groups, return_inverse=True)[1]
+    order = np.argsort(codes, kind="stable")
+    bounds = np.r_[0, np.flatnonzero(np.diff(codes[order])) + 1, len(codes)]
+    members = [order[bounds[i] : bounds[i + 1]] for i in range(len(bounds) - 1)]
+    diffs = []
+    for _ in range(n_resamples):
+        pick = rng.integers(0, len(members), size=len(members))
+        idx = np.concatenate([members[i] for i in pick])
+        if y[idx].sum() == 0:
+            continue
+        diffs.append(metric(y[idx], score_a[idx]) - metric(y[idx], score_b[idx]))
+    lo, hi = np.quantile(diffs, [alpha / 2, 1 - alpha / 2])
+    return {
+        "point": float(metric(y, score_a) - metric(y, score_b)),
+        "ci_low": float(lo),
+        "ci_high": float(hi),
+        "resamples": len(diffs),
+        "method": "paired customer-cluster percentile bootstrap",
+    }

@@ -75,6 +75,10 @@ class DecisionPolicy(BaseModel):
             )
 
     def decide(self, score: float) -> DecisionOutcome:
+        # Only a calibrated fraud probability may drive a decision. Anything else (for example
+        # an unsupervised anomaly score object) is a programming error, not a value to coerce.
+        if isinstance(score, bool) or not isinstance(score, (float, int)):
+            raise TypeError(f"decision policy requires a fraud probability, got {type(score)!r}")
         if not 0.0 <= score <= 1.0:
             raise ValueError(f"score out of range: {score}")
         t = self.thresholds

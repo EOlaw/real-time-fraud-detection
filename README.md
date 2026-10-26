@@ -4,9 +4,12 @@ A fraud-risk scoring platform built phase by phase: a reproducible ML pipeline w
 plus a low-latency scoring API that uses the same point-in-time feature definitions online as in
 training. Decisions are **sandboxed**: nothing here connects to real money movement.
 
-> **Status: Phases 1–2 complete.** The working path is: ingest (CSV or Parquet) → quality checks
-> → canonical tokenized dataset → idempotent PostgreSQL import → features → train and evaluate →
-> versioned artifact → authenticated real-time scoring → policy decision → audited persistence.
+> **Status: Phases 1–3 complete.** The working path is: ingest (CSV or Parquet) → quality checks
+> → canonical tokenized dataset → idempotent PostgreSQL import → features → chronological CV
+> tuning and imbalance comparison → versioned artifact + bound policy → gated promotion →
+> authenticated real-time scoring → policy decision → audited persistence. Serving still uses
+> `card-fraud-xgb@1.0.0`; the Phase 3 candidate `1.1.0` passed every promotion gate but has not
+> been promoted.
 > The dashboard, streaming layer, rules engine, case management and MLOps monitoring
 > are designed but **not built yet**; see [Roadmap](#roadmap). Nothing below describes them as
 > working.
@@ -42,7 +45,9 @@ failure modes, streaming design, broker choice, monitoring) ·
 [dataset selection](docs/data/dataset-selection.md) ·
 [ingestion and import](docs/data/ingestion-and-import.md) ·
 [model development plan](docs/ml/model-development-plan.md) ·
-[model card](docs/ml/model-card-card-fraud-xgb-1.0.0.md) ·
+[model card 1.0.0](docs/ml/model-card-card-fraud-xgb-1.0.0.md) ·
+[Phase 3 experiment](docs/ml/phase3-experiment.md) ·
+[model card 1.1.0 (candidate)](docs/ml/model-card-card-fraud-xgb-1.1.0.md) ·
 [security](docs/security/security.md)
 
 ## Dataset
@@ -88,6 +93,31 @@ Chronological split; selection and threshold on validation; the test window (= p
 precision 0.876 and recall 0.904 at the validation-chosen threshold, FPR 0.049%, ECE 0.00017.
 Full tables, segments and calibration are in the [model card](docs/ml/model-card-card-fraud-xgb-1.0.0.md).
 
+### Phase 3: tuning, imbalance, explanations, anomaly (synthetic data)
+
+`make experiment` (833 s) tunes XGBoost with Optuna on three expanding CV folds *inside* the
+training window (7-day embargo, 30 trials, incumbent as trial 0), then compares four imbalance
+strategies with resampling applied only to training rows. It selects on validation with the same
+rule as Phase 1, scores the test window once at the end, and logs lineage to a local MLflow store.
+
+| | Validation AP | Validation Brier | Test AP [95% CI] |
+|---|---|---|---|
+| Incumbent `1.0.0` (serving) | 0.9777 | 0.00058 | 0.9553 [0.9459, 0.9634] |
+| **Tuned, no resampling → candidate `1.1.0`** | 0.9789 | 0.00056 | **0.9601** [0.9509, 0.9682] |
+| Tuned + class weighting | 0.9781 | 0.00134 | 0.9575 (post hoc) |
+| Tuned + undersampling 1:10 | 0.9732 | 0.00174 | 0.9520 (post hoc) |
+| Tuned + SMOTE-NC 1:10 | 0.9695 | 0.00098 | 0.9457 (post hoc) |
+
+* **No imbalance treatment helped**; undersampling and SMOTE-NC were significantly worse.
+* `1.1.0` tied the incumbent on validation and won the calibration tie-break. On test it is
+  +0.0048 AP (paired CI [+0.0029, +0.0073]): recall 0.929 vs 0.904, precision 0.843 vs 0.876.
+* SHAP (exact TreeSHAP, **log-odds**) reconstructs the model margin to 3.1e-5.
+* An unsupervised Isolation Forest score has weak standalone signal (test AP 0.067) and adds
+  nothing on top of the fraud model. It stays a separate type that the decision policy rejects.
+* Promotion gates (artifact hash, bound policy, threshold provenance, online/offline parity on
+  500 real events, decisions) **all pass**. The candidate also served 2,000 events through the
+  real API in a throwaway database with exact parity. **It has not been promoted.**
+
 ## Measured latency (not a load test)
 
 20,000 held-out-window events replayed sequentially through the HTTP API by one client
@@ -119,7 +149,7 @@ make install                    # uv sync
 make data                       # download + SHA-256 verify (~500 MB)
 make ingest                     # -> ml/data/processed (validated, tokenized, versioned) ~11 s
 make train                      # ~1 min on an M4 Pro -> ml/artifacts/card-fraud-xgb-1.0.0
-make promote                    # ml/artifacts/current -> that artifact
+make link-baseline              # ml/artifacts/current -> card-fraud-xgb-1.0.0
 make db-up migrate
 
 set -a; source .env; set +a
@@ -129,6 +159,15 @@ FRAUD_NEW_USER_PASSWORD='<12+ chars>' uv run python -m fraud_api.cli create-user
 # 30 days of history before the test window, so replayed events see the same lookback:
 make import ORG=demo SOURCE=backfill START=2020-05-22T12:14:00+00:00 END=2020-06-21T12:14:00+00:00
 make api                        # http://127.0.0.1:8000/docs
+```
+
+Phase 3 experiment, MLflow and gated promotion:
+
+```bash
+make experiment                 # ~14 min; new version only if it wins selection; never promotes
+make mlflow-ui                  # local MLflow UI at http://127.0.0.1:5000
+make promote-check              # gates for CANDIDATE=card-fraud-xgb-1.1.0; changes nothing
+make promote                    # gates + switch ml/artifacts/current and the active policy
 ```
 
 Replay the held-out window through the API (labeled `source=replay`):
@@ -201,9 +240,20 @@ make lint typecheck             # ruff + mypy --strict
 make test                       # needs `make db-up` for integration tests
 ```
 
-Last local run (Phase 2, 2026-10-26): **112 passed, 0 skipped, 0 failed**.
+Last local run (Phase 3, 2026-10-26): **133 passed, 0 skipped, 0 failed**.
 
-* 68 unit tests: feature parity and leakage, ingestion (quality checks, error vs. warning
+* 21 Phase 3 unit tests (`tests/unit/test_phase3.py`) cover:
+  * fold chronology and embargo
+  * tuning blind to post-training-window rows and labels
+  * a spy proving resampling only sees fold-train rows
+  * SMOTE-NC row validity
+  * test-label flips changing no training decision
+  * reproducibility
+  * the anomaly score unable to reach the policy or model
+  * SHAP log-odds reconstruction and corruption detection
+  * a tracker and on-disk MLflow store scan for transaction data and secrets
+  * promotion gates and reversible apply
+* 68 Phase 1–2 unit tests: feature parity and leakage, ingestion (quality checks, error vs. warning
   behaviour, exact and conflicting duplicates, CSV/Parquet equivalence, ordering, output
   preservation on failure, sensitive-value scans of outputs, reports, stdout/stderr and logs),
   metrics, policy, artifact integrity, training reproducibility and test-label independence.
@@ -219,15 +269,21 @@ Actions workflow has not been run for Phase 2.
 
 ```text
 apps/api/fraud_api/      FastAPI app: core (config, logging, security, errors), db (models,
-                         session, importer), scoring (schemas, policy, service), api (deps, routes), cli
+                         session, importer), scoring (schemas, policy, service), api (deps, routes), promotion gates,
+                         cli
 apps/api/migrations/     Alembic migrations (0001 initial schema + append-only audit trigger)
 ml/fraud_ml/             ML library shared by training and serving
   domains/               domain adapters (card_payments)
   data/                  raw/canonical schemas, ingestion, quality checks and report
   features/              spec + offline (vectorized) + online (per-event) implementations
-  training/ evaluation/  candidates, splits, selection, rare-event metrics, bootstrap CIs
+  training/ evaluation/  candidates, splits, selection, CV folds, Optuna tuning, imbalance
+                         strategies, Phase 3 experiment, rare-event metrics, bootstrap CIs
+  explain/               exact TreeSHAP explanations (log-odds) with reconstruction checks
+  anomaly/               unsupervised Isolation Forest score (separate type, not a probability)
+  tracking.py            MLflow tracking with a guard against transaction data and secrets
   models/                pickle-free artifact save/load with hash verification
-ml/configs/              training config, decision policy (bound to a model version)
+ml/configs/              training/experiment configs, active decision policy, candidate
+                         policies (policies/), each bound to one model version
 ml/data/, ml/artifacts/  git-ignored; produced by make data/ingest/train
 scripts/                 dataset download (SHA-pinned), API replay/parity harness
 tests/unit, tests/integration
@@ -260,8 +316,8 @@ Implemented controls and the gaps a regulated deployment would still need to clo
 |---|---|---|
 | 1 | Architecture, dataset, contracts, vertical slice | **Done** |
 | 2 | Data engineering: quality report with error/warning checks, CSV/Parquet parity, idempotent PostgreSQL import | **Done** |
-| 3 | ML: Optuna with time-series CV, SMOTE/undersampling comparison, SHAP, anomaly baselines, MLflow | Next |
-| 4 | Scoring API: batch endpoint, model metadata endpoints | Single-event scoring done |
+| 3 | ML: Optuna with chronological CV, imbalance comparison, SHAP, anomaly baseline, MLflow, gated promotion | **Done** (candidate 1.1.0 not promoted) |
+| 4 | Scoring API: batch endpoint, model metadata endpoints | Next (single-event scoring done) |
 | 5 | Redis Streams ingestion, workers, DLQ, simulator, SSE | Designed |
 | 6 | Rules engine, analytics endpoints | Designed (DDL ready) |
 | 7 | Next.js command center | Not started |

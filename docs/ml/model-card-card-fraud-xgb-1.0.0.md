@@ -1,5 +1,11 @@
 # Model card — `card-fraud-xgb@1.0.0`
 
+**Status: serving (incumbent baseline).** Phase 3 produced a candidate,
+[`card-fraud-xgb@1.1.0`](model-card-card-fraud-xgb-1.1.0.md). It ties this model on validation
+AP (selected by the calibration tie-break) and scores +0.0048 AP on test (paired CI
+[+0.0029, +0.0073]). It has not been promoted. This model's artifact, policy and numbers below
+are unchanged.
+
 All numbers below were produced by `make train` on 2026-10-26 and are copied from
 `ml/artifacts/card-fraud-xgb-1.0.0/evaluation.json`. Re-running training with the same data and
 config reproduces the artifact byte-for-byte (SHA-256 `fa211a778e02…`, verified with two runs).
