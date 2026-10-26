@@ -4,9 +4,10 @@ A fraud-risk scoring platform built phase by phase: a reproducible ML pipeline w
 plus a low-latency scoring API that uses the same point-in-time feature definitions online as in
 training. Decisions are **sandboxed**: nothing here connects to real money movement.
 
-> **Status: Phase 1 vertical slice.** The working path is: ingest → validate → features → train and
-> evaluate → versioned artifact → authenticated real-time scoring → policy decision → audited
-> persistence. The dashboard, streaming layer, rules engine, case management and MLOps monitoring
+> **Status: Phases 1–2 complete.** The working path is: ingest (CSV or Parquet) → quality checks
+> → canonical tokenized dataset → idempotent PostgreSQL import → features → train and evaluate →
+> versioned artifact → authenticated real-time scoring → policy decision → audited persistence.
+> The dashboard, streaming layer, rules engine, case management and MLOps monitoring
 > are designed but **not built yet**; see [Roadmap](#roadmap). Nothing below describes them as
 > working.
 
@@ -39,6 +40,7 @@ Details: [architecture overview](docs/architecture/overview.md) (components, inf
 failure modes, streaming design, broker choice, monitoring) ·
 [database design](docs/architecture/database-design.md) ·
 [dataset selection](docs/data/dataset-selection.md) ·
+[ingestion and import](docs/data/ingestion-and-import.md) ·
 [model development plan](docs/ml/model-development-plan.md) ·
 [model card](docs/ml/model-card-card-fraud-xgb-1.0.0.md) ·
 [security](docs/security/security.md)
@@ -51,6 +53,23 @@ stable entity IDs, real calendar timestamps and a permissive license, which are 
 prerequisites for point-in-time behavioral features and replay. **It is synthetic**, and its fraud
 is much easier to detect than real fraud. The download is SHA-256 pinned and was verified against
 the Kaggle original's published row counts, fraud counts and time ranges.
+
+## Data pipeline (Phase 2)
+
+`make ingest` validates the raw files (CSV or Parquet; both produce the identical canonical
+output), reads only the eight required raw columns, tokenizes card numbers, drops exact duplicates
+and rejects conflicting ones, sorts events by `(event_time, event_id)`, and writes a canonical
+parquet, a quality report and a manifest. Each quality check is either an **error** (exit 1;
+only `data_quality_report.failed.json` is written and existing outputs are untouched) or a
+**warning** (recorded; `--fail-on-warning` makes it fatal). Large amounts are reported, never
+removed. On the real data every check passed with no warnings.
+
+`make import ORG=demo SOURCE=backfill` (or `fraud_api.cli import-transactions`) loads canonical
+parquet into PostgreSQL for one organization. Imports are labeled with their source, idempotent
+on retry, reject conflicting duplicate ids, and are all-or-nothing in one transaction. Measured:
+1,852,394 rows in 58 s, retry in 40 s with 0 inserted, amounts identical to the cent. Details,
+check definitions, report format and failure behaviour are in
+[docs/data/ingestion-and-import.md](docs/data/ingestion-and-import.md).
 
 ## Results (synthetic data — read the caveat above)
 
@@ -98,7 +117,7 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker. Python 3.12 is installe
 cp .env.example .env            # then replace every change-me with a random secret
 make install                    # uv sync
 make data                       # download + SHA-256 verify (~500 MB)
-make ingest                     # -> ml/data/processed (validated, tokenized, versioned)
+make ingest                     # -> ml/data/processed (validated, tokenized, versioned) ~11 s
 make train                      # ~1 min on an M4 Pro -> ml/artifacts/card-fraud-xgb-1.0.0
 make promote                    # ml/artifacts/current -> that artifact
 make db-up migrate
@@ -107,9 +126,8 @@ set -a; source .env; set +a
 uv run python -m fraud_api.cli create-org --slug demo --name "Demo Bank (sandbox)"
 FRAUD_NEW_USER_PASSWORD='<12+ chars>' uv run python -m fraud_api.cli create-user \
     --org demo --email svc@demo.example.com --role service
-uv run python -m fraud_api.cli load-history --org demo \
-    --data ml/data/processed/card_transactions.parquet \
-    --start 2020-05-22T12:14:00+00:00 --end 2020-06-21T12:14:00+00:00
+# 30 days of history before the test window, so replayed events see the same lookback:
+make import ORG=demo SOURCE=backfill START=2020-05-22T12:14:00+00:00 END=2020-06-21T12:14:00+00:00
 make api                        # http://127.0.0.1:8000/docs
 ```
 
@@ -171,7 +189,8 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/fraud/score \
 Contract notes: `event_time` must include a timezone; `amount` is a decimal with ≤ 2 places;
 `category` must be a known card category; unknown fields (e.g. `cvv`) are rejected. Retrying with
 the same `transaction_id` and payload returns the original decision (`idempotent_replay: true`);
-reusing it with a different payload returns `409`. If the model is unavailable, the default
+reusing it with a different payload returns `409`, and so does reusing the id of an imported
+(unscored) history row (`transaction_exists_unscored`). If the model is unavailable, the default
 `FRAUD_FAILURE_MODE=manual_review` returns `status: degraded`, `risk_score: null`,
 `decision: review`. It never returns `allow`.
 
@@ -182,23 +201,29 @@ make lint typecheck             # ruff + mypy --strict
 make test                       # needs `make db-up` for integration tests
 ```
 
-Last local run: **74 passed**: 46 unit tests (feature parity and leakage, ingestion and
-tokenization, metrics, policy, artifact integrity, training reproducibility, test-label
-independence) and 28 integration tests against PostgreSQL (auth and forged tokens, RBAC,
-validation, real-model scoring correctness, idempotency including 8 concurrent duplicates, tenant
-isolation, degraded and reject modes, history-limit handling, append-only audit log, DB-level
-invariants, race-free model registration). The CI workflow (`.github/workflows/ci.yml`) mirrors
-this but **has not run yet**, because the repository has not been pushed.
+Last local run (Phase 2, 2026-10-26): **112 passed, 0 skipped, 0 failed**.
+
+* 68 unit tests: feature parity and leakage, ingestion (quality checks, error vs. warning
+  behaviour, exact and conflicting duplicates, CSV/Parquet equivalence, ordering, output
+  preservation on failure, sensitive-value scans of outputs, reports, stdout/stderr and logs),
+  metrics, policy, artifact integrity, training reproducibility and test-label independence.
+* 44 integration tests against PostgreSQL: the 28 Phase 1 API tests, plus 16 import tests (tenant
+  scope, source labels, idempotent retry, overlapping windows, concurrent imports, conflict abort,
+  rollback after a failure, statement timeout, manifest tamper detection, CLI exit codes,
+  imported history feeding scoring, no sensitive values in DB rows).
+
+Integration tests skip, and are reported as skipped, when PostgreSQL is unreachable. The GitHub
+Actions workflow has not been run for Phase 2.
 
 ## Repository structure
 
 ```text
 apps/api/fraud_api/      FastAPI app: core (config, logging, security, errors), db (models,
-                         session), scoring (schemas, policy, service), api (deps, routes), cli
+                         session, importer), scoring (schemas, policy, service), api (deps, routes), cli
 apps/api/migrations/     Alembic migrations (0001 initial schema + append-only audit trigger)
 ml/fraud_ml/             ML library shared by training and serving
   domains/               domain adapters (card_payments)
-  data/                  raw/canonical schemas, ingestion
+  data/                  raw/canonical schemas, ingestion, quality checks and report
   features/              spec + offline (vectorized) + online (per-event) implementations
   training/ evaluation/  candidates, splits, selection, rare-event metrics, bootstrap CIs
   models/                pickle-free artifact save/load with hash verification
@@ -225,6 +250,8 @@ Implemented controls and the gaps a regulated deployment would still need to clo
 * No device, login, decline or authentication data, so those behavioral features don't exist.
 * The dataset clock's timezone is unknown; hour features assume UTC.
 * Cold-start customers can score very high (see the model card).
+* Ingestion holds a whole input in memory (about 1.9M rows run comfortably on a laptop); much
+  larger files would need chunked processing.
 * Not deployed anywhere. AWS deployment is designed for Phase 10 and has not been executed.
 
 ## Roadmap
@@ -232,7 +259,7 @@ Implemented controls and the gaps a regulated deployment would still need to clo
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Architecture, dataset, contracts, vertical slice | **Done** |
-| 2 | Data engineering: richer quality reports, Parquet/Postgres ingestion paths | Partly done (ingestion, validation, quality report, versioning) |
+| 2 | Data engineering: quality report with error/warning checks, CSV/Parquet parity, idempotent PostgreSQL import | **Done** |
 | 3 | ML: Optuna with time-series CV, SMOTE/undersampling comparison, SHAP, anomaly baselines, MLflow | Next |
 | 4 | Scoring API: batch endpoint, model metadata endpoints | Single-event scoring done |
 | 5 | Redis Streams ingestion, workers, DLQ, simulator, SSE | Designed |

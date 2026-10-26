@@ -57,9 +57,11 @@ access can ingest `fraudTrain.csv`/`fraudTest.csv` directly; the raw schema is i
 | `is_fraud` | Target | — |
 
 Outputs: `card_transactions.parquet` (1,852,394 rows, 999 customers, 9,651 fraud),
-`dataset_manifest.json` (dataset version `ef8be78c6f87` = hash of input hashes + ingestion
-version), `data_quality_report.json` (missing values: 0; duplicate ids: 0; amount 1.00–28,948.90,
-median 47.52; 3×IQR outliers reported but retained, since large amounts are legitimate signal).
+`dataset_manifest.json` (dataset version `ef8be78c6f87` = hash of input hashes + canonical
+contract version), `data_quality_report.json` (status `passed`, no warnings; missing values: 0;
+duplicate ids: 0; amount 1.00–28,948.90, median 47.52; 3×IQR outliers reported but retained, since
+large amounts are legitimate signal). The checks, report format, failure behaviour and the
+PostgreSQL import path are documented in [ingestion-and-import.md](ingestion-and-import.md).
 
 ## Target, temporal properties, imbalance
 

@@ -102,13 +102,21 @@ def _existing(
 ) -> ScoreResponse | None:
     row = session.execute(
         select(Transaction, RiskAssessment, ModelVersion)
-        .join(RiskAssessment, RiskAssessment.transaction_id == Transaction.id)
+        .outerjoin(RiskAssessment, RiskAssessment.transaction_id == Transaction.id)
         .outerjoin(ModelVersion, ModelVersion.id == RiskAssessment.model_version_id)
         .where(Transaction.organization_id == org_id, Transaction.external_id == req.transaction_id)
     ).first()
     if row is None:
         return None
     txn, ra, mv = row
+    if ra is None:
+        # Imported history (backfill/replay file import) is stored unscored; it is not re-scored
+        # under the same id.
+        raise APIError(
+            409,
+            "transaction_exists_unscored",
+            "transaction_id already exists as imported history and was not scored",
+        )
     if txn.payload_sha256 != payload_hash:
         raise APIError(
             409,

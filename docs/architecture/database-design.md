@@ -43,6 +43,14 @@ erDiagram
 | `risk_assessments` | `transaction_id UNIQUE FK`, `model_version_id FK NULL`, `status`, `risk_score`, `risk_level`, `decision`, `decision_mode`, `reasons JSONB`, `policy_version`, `features JSONB` (snapshot used for the decision), `timings_ms JSONB`, `correlation_id`; checks listed above | `(organization_id, scored_at)` |
 | `audit_logs` | `bigserial PK`, `organization_id`, `actor_user_id`, `action`, `resource_type`, `resource_id`, `details JSONB`, `correlation_id`; append-only trigger | `(organization_id, created_at)` |
 
+**How rows arrive.** Scored rows come from `POST /api/v1/fraud/score` (`schema_version` = the API
+request schema, e.g. `1.0`; `payload_sha256` = hash of the request). Unscored history comes from
+the Phase 2 importer (`schema_version = 'canonical-1'`; `payload_sha256` = hash of the canonical
+fields; `source` ∈ `backfill`, `replay`, `simulated`). Idempotency for imports compares row content,
+not hashes, so rows written by earlier loaders are recognised as already present. An imported id
+can never be scored later under the same id (API returns 409). Fraud labels are not stored in
+`transactions`; they get the provenance-tracked `fraud_labels` table in Phase 8.
+
 Storing the exact feature snapshot with each decision makes every decision reproducible and is the
 input for later drift monitoring and SHAP explanations.
 

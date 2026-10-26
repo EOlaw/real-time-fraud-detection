@@ -39,7 +39,8 @@ flowchart LR
 | Component | Responsibility | Status |
 |---|---|---|
 | `ml/fraud_ml/domains/card_payments.py` | Domain adapter: category vocabulary, channel derivation, assumed currency | Implemented |
-| `ml/fraud_ml/data` | Raw schema (Pandera), ingestion, tokenization, dedupe, quality report, dataset version | Implemented |
+| `ml/fraud_ml/data` | Raw schema (Pandera), CSV/Parquet ingestion, tokenization, dedupe, error/warning quality checks and report, dataset version ([details](../data/ingestion-and-import.md)) | Implemented (Phase 2) |
+| `apps/api/fraud_api/db/importer.py` | Canonical parquet → `transactions`: tenant-scoped, source-labeled, idempotent, all-or-nothing | Implemented (Phase 2) |
 | `ml/fraud_ml/features` | Feature spec + two independent implementations (vectorized offline, per-event online) | Implemented |
 | `ml/fraud_ml/training`, `evaluation` | Candidate models, chronological splits, rare-event metrics, bootstrap CIs | Implemented |
 | `ml/fraud_ml/models/artifact.py` | Pickle-free artifact format, hash + feature-contract verification | Implemented |
@@ -134,6 +135,12 @@ PostgreSQL is the system of record (see [database-design.md](database-design.md)
 disagree with the stored decision. Redis enters with the streaming layer (and possibly a feature
 cache, if measured history-query latency requires it — at present the history query is part of a
 3.3 ms p50 server-side path).
+
+Historical events enter PostgreSQL through the batch importer (`fraud_api.cli
+import-transactions`): one transaction per import, `COPY` into a staging table, content-based
+idempotency and conflict detection, and a per-tenant advisory lock. Imported rows are unscored
+history (`source` = `backfill`/`replay`/`simulated`) that the online features read; they are never
+labeled as live traffic.
 
 ## 6. Frontend integration (Phase 7 — designed)
 

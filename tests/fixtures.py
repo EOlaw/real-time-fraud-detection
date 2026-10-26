@@ -7,6 +7,7 @@ computed from them.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -44,3 +45,48 @@ def synthetic_events(n: int = 2_000, n_customers: int = 25, seed: int = 7) -> pd
             "source_file": "synthetic_fixture",
         }
     )
+
+
+KEY = b"k" * 32
+PAN_A, PAN_B = "4111111111111111", "5500000000000004"
+# Raw values that must never appear in any output, report, stdout/stderr or log record.
+SENSITIVE = [PAN_A, PAN_B, "Janeprivate", "Doeprivate", "1 Secret Street", "1980-07-14"]
+
+
+def raw_frame(n: int = 8, start: str = "2019-01-01 00:00:00") -> pd.DataFrame:
+    """Raw Sparkov-shaped rows, including PII columns ingestion must never read."""
+    t0 = pd.Timestamp(start)
+    times = [t0 + pd.Timedelta(minutes=i) for i in range(n)]
+    times[2] = times[1]  # a timestamp tie, to check deterministic ordering
+    return pd.DataFrame(
+        {
+            "Unnamed: 0": range(n),
+            "trans_date_trans_time": [t.strftime("%Y-%m-%d %H:%M:%S") for t in times],
+            "cc_num": [PAN_A if i % 2 == 0 else PAN_B for i in range(n)],
+            "merchant": ["fraud_Acme"] * n,
+            "category": (["grocery_pos", "shopping_net", "travel", "home"] * n)[:n],
+            "amt": [10.5, 20.0, 300.0, 4.99, 1250.75, 8.0, 99.99, 15.25][:n],
+            "first": ["Janeprivate"] * n,
+            "last": ["Doeprivate"] * n,
+            "street": ["1 Secret Street"] * n,
+            "dob": ["1980-07-14"] * n,
+            "state": ["NY"] * n,
+            "trans_num": [f"{i:032x}" for i in range(n)],
+            "is_fraud": [0, 1, 0, 0, 1, 0, 0, 0][:n],
+        }
+    )
+
+
+def write(df: pd.DataFrame, path: Path, natural_types: bool = False) -> Path:
+    if path.suffix == ".csv":
+        df.to_csv(path, index=False)
+    elif natural_types:
+        # Parquet as a producer would typically write it: integer card numbers, real timestamps.
+        typed = df.assign(
+            cc_num=df["cc_num"].astype("int64"),
+            trans_date_trans_time=pd.to_datetime(df["trans_date_trans_time"]),
+        )
+        typed.to_parquet(path, index=False)
+    else:
+        df.astype({"cc_num": str}).to_parquet(path, index=False)
+    return path

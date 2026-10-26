@@ -3,8 +3,11 @@ SHELL := /bin/bash
 ENV := set -a; [ -f .env ] && source .env; set +a;
 RAW ?= ml/data/raw/sparkov/credit_card_transaction_train.csv ml/data/raw/sparkov/credit_card_transaction_test.csv
 MODEL ?= card-fraud-xgb-1.0.0
+ORG ?= demo
+SOURCE ?= backfill
+DATA ?= ml/data/processed/card_transactions.parquet
 
-.PHONY: install data ingest train promote db-up migrate api test test-unit test-integration lint typecheck check
+.PHONY: install data ingest import train promote db-up migrate api test test-unit test-integration lint typecheck check
 
 install:            ## Install Python dependencies (uv, Python 3.12)
 	uv sync
@@ -14,6 +17,10 @@ data:               ## Download the dataset and verify SHA-256
 
 ingest:             ## Validate, minimize and tokenize raw data -> ml/data/processed
 	$(ENV) uv run python -m fraud_ml.data.ingest $(foreach f,$(RAW),--raw $(f)) --out ml/data/processed
+
+import:             ## Import canonical parquet into PostgreSQL (ORG, SOURCE, optional START/END)
+	$(ENV) uv run python -m fraud_api.cli import-transactions --org $(ORG) --data $(DATA) \
+		--source $(SOURCE) $(if $(START),--start $(START)) $(if $(END),--end $(END))
 
 train:              ## Train/compare models, write artifact + evaluation report
 	uv run python -m fraud_ml.training.train --config ml/configs/train_card_v1.yaml

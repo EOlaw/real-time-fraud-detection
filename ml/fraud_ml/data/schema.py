@@ -21,11 +21,24 @@ RAW_COLUMNS: tuple[str, ...] = (
 
 RawTransactionSchema = pa.DataFrameSchema(
     {
-        "trans_date_trans_time": pa.Column("datetime64[ns]", nullable=False),
+        # Normalized by ingestion to naive microsecond timestamps for both CSV and Parquet input.
+        "trans_date_trans_time": pa.Column("datetime64[us]", nullable=False),
         "cc_num": pa.Column(str, nullable=False, checks=pa.Check.str_matches(r"^\d{8,19}$")),
         "merchant": pa.Column(str, nullable=False),
         "category": pa.Column(str, pa.Check.isin(MERCHANT_CATEGORIES), nullable=False),
-        "amt": pa.Column(float, [pa.Check.gt(0), pa.Check.lt(1_000_000)], nullable=False),
+        "amt": pa.Column(
+            float,
+            [
+                pa.Check.gt(0),
+                pa.Check.lt(1_000_000),
+                # The scoring API and NUMERIC(18,2) storage require cents; never round silently.
+                pa.Check(
+                    lambda s: ((s * 100) - (s * 100).round()).abs() < 1e-6,
+                    name="max_2_decimal_places",
+                ),
+            ],
+            nullable=False,
+        ),
         "state": pa.Column(str, pa.Check.str_matches(r"^[A-Z]{2}$"), nullable=False),
         "trans_num": pa.Column(str, pa.Check.str_matches(r"^[0-9a-f]{32}$"), nullable=False),
         "is_fraud": pa.Column(int, pa.Check.isin([0, 1]), nullable=False),
