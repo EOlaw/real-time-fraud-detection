@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-10-26T07:00:38.065065+00:00",
+  "traffic": "historical replay of the held-out test window (source=replay); not live",
+  "window_start": "2020-06-21T12:14:00+00:00",
+  "events": 20000,
+  "degraded": 0,
+  "decisions": {
+    "allow": 19845,
+    "challenge": 86,
+    "review": 45,
+    "decline": 24
+  },
+  "risk_levels": {
+    "low": 19845,
+    "medium": 86,
+    "high": 45,
+    "critical": 24
+  },
+  "labels_in_window": 68,
+  "review_or_decline_precision": 0.8695652173913043,
+  "review_or_decline_recall": 0.8823529411764706,
+  "note": "Replay starts after a 30-day backfill; window is a prefix of the test period, so these figures are a smoke check, not the model evaluation.",
+  "latency_ms": {
+    "client_round_trip": {
+      "p50": 7.6178959861863405,
+      "p95": 15.198333683656529,
+      "p99": 17.053708500461646
+    },
+    "server_processing": {
+      "p50": 3.2842500368133187,
+      "p95": 9.907835780177262,
+      "p99": 11.303046433604322
+    },
+    "mean_client": 8.41748314878787
+  },
+  "throughput_rps_sequential_single_client": 116.86970271687902,
+  "parity_checks": {
+    "checked": 200,
+    "max_rel_feature_diff": 1.6709653331419751e-12,
+    "max_score_diff": 0.0
+  },
+  "environment": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "release": "25.6.0",
+    "python": "3.12.13",
+    "setup": "uvicorn 1 worker + PostgreSQL 17 (Docker) on the same host; sequential requests, 1 client, keep-alive"
+  }
+}

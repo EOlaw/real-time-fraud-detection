@@ -1,0 +1,38 @@
+# Training configuration for the card-payments domain, feature spec card-v1.
+# All split boundaries are UTC on the dataset clock (see docs/data/dataset-selection.md).
+model_name: card-fraud-xgb
+model_version: 1.0.0
+seed: 42
+
+splits:
+  # Rows before this have truncated 30-day history (dataset starts 2019-01-01); they are still
+  # used as history for later rows, but are not training examples.
+  warmup_end: "2019-02-01T00:00:00Z"
+  train_end: "2020-03-01T00:00:00Z"
+  # The held-out test set starts exactly where the published fraudTest.csv starts. It is not read
+  # for model selection or threshold tuning.
+  validation_end: "2020-06-21T12:14:00Z"
+
+evaluation:
+  review_capacity_fraction: 0.005   # top-K budget: analysts review 0.5% of transactions
+  alert_rates: [0.001, 0.0025, 0.005, 0.01, 0.02]
+  threshold_fbeta: 2.0              # recall-weighted; missed fraud assumed costlier than review
+  bootstrap_resamples: 200
+  selection_ap_tolerance: 0.005     # AP differences below this are treated as noise
+
+models:
+  logistic_regression:
+    C: 1.0
+    max_iter: 2000
+  random_forest:
+    n_estimators: 200
+    min_samples_leaf: 20
+    max_features: sqrt
+  xgboost:
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 6
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 1.0
+    reg_lambda: 1.0

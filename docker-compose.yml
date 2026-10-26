@@ -1,0 +1,41 @@
+# Local development stack. Credentials come from .env (see .env.example); none are hardcoded.
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres-init.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    environment:
+      FRAUD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      FRAUD_JWT_SECRET: ${FRAUD_JWT_SECRET:?set in .env}
+      FRAUD_MODEL_DIR: /app/model
+      FRAUD_POLICY_PATH: /app/ml/configs/decision_policy.yaml
+      FRAUD_FAILURE_MODE: ${FRAUD_FAILURE_MODE:-manual_review}
+    volumes:
+      # Trained artifact mounted read-only; produce it with `make train`.
+      - ./ml/artifacts/current:/app/model:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["api"]
+
+volumes:
+  pgdata:

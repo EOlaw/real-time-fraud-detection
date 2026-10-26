@@ -1,0 +1,15 @@
+features: (1852394, 34) in 2.7s
+dummy_prior: val AP=0.0059 (0.0s)
+logistic_regression: val AP=0.3993 (2.6s)
+random_forest: val AP=0.9465 (22.0s)
+xgboost: val AP=0.9777 (4.9s)
+xgboost_weighted: val AP=0.9781 (5.0s)
+{
+  "selected_for_serving": "xgboost",
+  "selection_note": "Selected = highest validation AP among servable candidates; candidates within 0.005 AP are tied and broken by validation Brier. 'xgboost_weighted' had the highest raw validation AP (servable).",
+  "decision_threshold": {
+    "value": 0.2120322436094284,
+    "method": "max F2 on validation"
+  }
+}
+artifact: ml/artifacts/card-fraud-xgb-1.0.0

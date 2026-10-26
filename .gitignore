@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Data and artifacts: never commit datasets, processed data, or trained models
+ml/data/raw/*
+ml/data/processed/*
+!ml/data/raw/.gitkeep
+!ml/data/processed/.gitkeep
+ml/artifacts/*
+!ml/artifacts/.gitkeep
+reports/runs/
+
+# Secrets
+.env
+*.pem
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

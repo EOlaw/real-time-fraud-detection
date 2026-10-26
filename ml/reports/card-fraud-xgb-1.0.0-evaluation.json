@@ -1,0 +1,426 @@
+{
+  "model_name": "card-fraud-xgb",
+  "model_version": "1.0.0",
+  "dataset_version": "ef8be78c6f87",
+  "model_sha256": "fa211a778e02a11fd652208adadb0b34cc39cff26e6849e546358cac1193ee11",
+  "splits": {
+    "train": {
+      "rows": 972318,
+      "positives": 5393,
+      "prevalence": 0.0055465393009282975,
+      "time_range": [
+        "2019-02-01T00:02:24+00:00",
+        "2020-02-28T23:59:45+00:00"
+      ]
+    },
+    "validation": {
+      "rows": 271832,
+      "positives": 1607,
+      "prevalence": 0.00591173960387298,
+      "time_range": [
+        "2020-03-01T00:02:20+00:00",
+        "2020-06-21T12:13:37+00:00"
+      ]
+    },
+    "test": {
+      "rows": 555719,
+      "positives": 2145,
+      "prevalence": 0.0038598644278853163,
+      "time_range": [
+        "2020-06-21T12:14:25+00:00",
+        "2020-12-31T23:59:34+00:00"
+      ]
+    }
+  },
+  "validation": {
+    "dummy_prior": {
+      "average_precision": 0.00591173960387298,
+      "roc_auc": 0.5,
+      "prevalence": 0.00591173960387298,
+      "n": 271832.0,
+      "positives": 1607.0,
+      "k": 1359.0,
+      "precision_at_k": 0.008094186902133923,
+      "recall_at_k": 0.006845052893590542,
+      "brier": 0.005876924309990253,
+      "fit_seconds": 0.03943420900031924,
+      "servable": false
+    },
+    "logistic_regression": {
+      "average_precision": 0.3993291235789076,
+      "roc_auc": 0.9875170044000416,
+      "prevalence": 0.00591173960387298,
+      "n": 271832.0,
+      "positives": 1607.0,
+      "k": 1359.0,
+      "precision_at_k": 0.4863870493009566,
+      "recall_at_k": 0.41132545115121344,
+      "brier": 0.036033738404512405,
+      "fit_seconds": 2.632620000047609,
+      "servable": false
+    },
+    "random_forest": {
+      "average_precision": 0.9465384339219095,
+      "roc_auc": 0.998182111371732,
+      "prevalence": 0.00591173960387298,
+      "n": 271832.0,
+      "positives": 1607.0,
+      "k": 1359.0,
+      "precision_at_k": 0.9477557027225901,
+      "recall_at_k": 0.8014934660858744,
+      "brier": 0.002374249931780277,
+      "fit_seconds": 22.048820791998878,
+      "servable": false
+    },
+    "xgboost": {
+      "average_precision": 0.9776889095806347,
+      "roc_auc": 0.9995710850329098,
+      "prevalence": 0.00591173960387298,
+      "n": 271832.0,
+      "positives": 1607.0,
+      "k": 1359.0,
+      "precision_at_k": 0.9911699779249448,
+      "recall_at_k": 0.8382078406969509,
+      "brier": 0.0005825672415085137,
+      "fit_seconds": 4.944311208964791,
+      "servable": true
+    },
+    "xgboost_weighted": {
+      "average_precision": 0.9781356732155582,
+      "roc_auc": 0.9993326932665703,
+      "prevalence": 0.00591173960387298,
+      "n": 271832.0,
+      "positives": 1607.0,
+      "k": 1359.0,
+      "precision_at_k": 0.9874908020603385,
+      "recall_at_k": 0.835096453018046,
+      "brier": 0.001688227173872292,
+      "fit_seconds": 4.961484582978301,
+      "servable": true
+    }
+  },
+  "best_on_validation": "xgboost_weighted",
+  "selected_for_serving": "xgboost",
+  "selection_note": "Selected = highest validation AP among servable candidates; candidates within 0.005 AP are tied and broken by validation Brier. 'xgboost_weighted' had the highest raw validation AP (servable).",
+  "decision_threshold": {
+    "value": 0.2120322436094284,
+    "method": "max F2 on validation"
+  },
+  "validation_operating_points": [
+    {
+      "target_alert_rate": 0.001,
+      "threshold": 0.9998113512992859,
+      "tp": 272,
+      "fp": 0,
+      "fn": 1335,
+      "tn": 270225,
+      "precision": 1.0,
+      "recall": 0.16925948973242066,
+      "f1": 0.2895156998403406,
+      "f2": 0.20298507462686569,
+      "false_positive_rate": 0.0,
+      "false_negative_rate": 0.8307405102675793,
+      "alert_rate": 0.0010006180287824833
+    },
+    {
+      "target_alert_rate": 0.0025,
+      "threshold": 0.9984696507453918,
+      "tp": 680,
+      "fp": 0,
+      "fn": 927,
+      "tn": 270225,
+      "precision": 1.0,
+      "recall": 0.42314872433105166,
+      "f1": 0.5946655006558811,
+      "f2": 0.4783342712436691,
+      "false_positive_rate": 0.0,
+      "false_negative_rate": 0.5768512756689483,
+      "alert_rate": 0.0025015450719562083
+    },
+    {
+      "target_alert_rate": 0.005,
+      "threshold": 0.8851243853569031,
+      "tp": 1347,
+      "fp": 12,
+      "fn": 260,
+      "tn": 270213,
+      "precision": 0.9911699779249448,
+      "recall": 0.8382078406969509,
+      "f1": 0.9082939986513824,
+      "f2": 0.8649030435340953,
+      "false_positive_rate": 4.440743824590619e-05,
+      "false_negative_rate": 0.16179215930304916,
+      "alert_rate": 0.00499941140115954
+    },
+    {
+      "target_alert_rate": 0.01,
+      "threshold": 0.012161930091679096,
+      "tp": 1578,
+      "fp": 1140,
+      "fn": 29,
+      "tn": 269085,
+      "precision": 0.5805739514348786,
+      "recall": 0.9819539514623522,
+      "f1": 0.7297109826589595,
+      "f2": 0.86267220642904,
+      "false_positive_rate": 0.0042187066333610876,
+      "false_negative_rate": 0.01804604853764779,
+      "alert_rate": 0.00999882280231908
+    },
+    {
+      "target_alert_rate": 0.02,
+      "threshold": 0.0018422928405925632,
+      "tp": 1600,
+      "fp": 3837,
+      "fn": 7,
+      "tn": 266388,
+      "precision": 0.2942799337870149,
+      "recall": 0.9956440572495333,
+      "f1": 0.45428733674048827,
+      "f2": 0.6742520016856299,
+      "false_positive_rate": 0.014199278379128504,
+      "false_negative_rate": 0.0043559427504667085,
+      "alert_rate": 0.020001324347391037
+    }
+  ],
+  "test": {
+    "average_precision": 0.955257442827662,
+    "roc_auc": 0.999252978039554,
+    "prevalence": 0.0038598644278853163,
+    "n": 555719.0,
+    "positives": 2145.0,
+    "at_validation_threshold": {
+      "threshold": 0.2120322436094284,
+      "tp": 1939,
+      "fp": 274,
+      "fn": 206,
+      "tn": 553300,
+      "precision": 0.8761861726163579,
+      "recall": 0.903962703962704,
+      "f1": 0.8898577329050023,
+      "f2": 0.8982673955341425,
+      "false_positive_rate": 0.0004949654427411692,
+      "false_negative_rate": 0.09603729603729604,
+      "alert_rate": 0.003982228428396366
+    },
+    "top_k": {
+      "k": 2779.0,
+      "precision_at_k": 0.7293990644116589,
+      "recall_at_k": 0.9449883449883449
+    },
+    "average_precision_ci": {
+      "point": 0.955257442827662,
+      "ci_low": 0.945857521916251,
+      "ci_high": 0.9633692974067031,
+      "resamples": 200,
+      "method": "customer-cluster percentile bootstrap"
+    },
+    "recall_at_threshold_ci": {
+      "point": 0.903962703962704,
+      "ci_low": 0.8846640640564758,
+      "ci_high": 0.9205827300491007,
+      "resamples": 200,
+      "method": "customer-cluster percentile bootstrap"
+    },
+    "precision_at_threshold_ci": {
+      "point": 0.8761861726163579,
+      "ci_low": 0.8559587204235605,
+      "ci_high": 0.8922930064089662,
+      "resamples": 200,
+      "method": "customer-cluster percentile bootstrap"
+    },
+    "calibration": {
+      "brier": 0.0005869839224033058,
+      "expected_calibration_error": 0.00017135905932742573,
+      "bins": [
+        {
+          "bin": [
+            0.0,
+            0.1
+          ],
+          "n": 553240,
+          "mean_predicted": 0.00017775424930732697,
+          "observed_rate": 0.0002620924011279011
+        },
+        {
+          "bin": [
+            0.1,
+            0.2
+          ],
+          "n": 247,
+          "mean_predicted": 0.1421516239643097,
+          "observed_rate": 0.2145748987854251
+        },
+        {
+          "bin": [
+            0.2,
+            0.30000000000000004
+          ],
+          "n": 134,
+          "mean_predicted": 0.2494417428970337,
+          "observed_rate": 0.34328358208955223
+        },
+        {
+          "bin": [
+            0.30000000000000004,
+            0.4
+          ],
+          "n": 88,
+          "mean_predicted": 0.348148375749588,
+          "observed_rate": 0.38636363636363635
+        },
+        {
+          "bin": [
+            0.4,
+            0.5
+          ],
+          "n": 73,
+          "mean_predicted": 0.443783164024353,
+          "observed_rate": 0.3972602739726027
+        },
+        {
+          "bin": [
+            0.5,
+            0.6000000000000001
+          ],
+          "n": 66,
+          "mean_predicted": 0.5533462166786194,
+          "observed_rate": 0.5757575757575758
+        },
+        {
+          "bin": [
+            0.6000000000000001,
+            0.7000000000000001
+          ],
+          "n": 52,
+          "mean_predicted": 0.6441888213157654,
+          "observed_rate": 0.6730769230769231
+        },
+        {
+          "bin": [
+            0.7000000000000001,
+            0.8
+          ],
+          "n": 64,
+          "mean_predicted": 0.7559677362442017,
+          "observed_rate": 0.78125
+        },
+        {
+          "bin": [
+            0.8,
+            0.9
+          ],
+          "n": 117,
+          "mean_predicted": 0.8496233820915222,
+          "observed_rate": 0.7948717948717948
+        },
+        {
+          "bin": [
+            0.9,
+            1.0
+          ],
+          "n": 1638,
+          "mean_predicted": 0.9904398322105408,
+          "observed_rate": 0.9902319902319903
+        }
+      ]
+    },
+    "segments_by_channel": {
+      "card_not_present": {
+        "average_precision": 0.975109333375868,
+        "roc_auc": 0.9996803668206844,
+        "prevalence": 0.009190263288623945,
+        "n": 88572.0,
+        "positives": 814.0,
+        "threshold": 0.2120322436094284,
+        "tp": 759,
+        "fp": 119,
+        "fn": 55,
+        "tn": 87639,
+        "precision": 0.8644646924829157,
+        "recall": 0.9324324324324325,
+        "f1": 0.8971631205673758,
+        "f2": 0.9179970972423804,
+        "false_positive_rate": 0.0013560017320358257,
+        "false_negative_rate": 0.06756756756756757,
+        "alert_rate": 0.009912839272004696
+      },
+      "card_present": {
+        "average_precision": 0.9785936329931114,
+        "roc_auc": 0.9997509299467463,
+        "prevalence": 0.005623804028688704,
+        "n": 136918.0,
+        "positives": 770.0,
+        "threshold": 0.2120322436094284,
+        "tp": 722,
+        "fp": 78,
+        "fn": 48,
+        "tn": 136070,
+        "precision": 0.9025,
+        "recall": 0.9376623376623376,
+        "f1": 0.9197452229299364,
+        "f2": 0.9304123711340205,
+        "false_positive_rate": 0.0005729059552839557,
+        "false_negative_rate": 0.06233766233766234,
+        "alert_rate": 0.005842913276559693
+      },
+      "unspecified": {
+        "average_precision": 0.8833060626195198,
+        "roc_auc": 0.9978412246733531,
+        "prevalence": 0.0016988211211008118,
+        "n": 330229.0,
+        "positives": 561.0,
+        "threshold": 0.2120322436094284,
+        "tp": 458,
+        "fp": 77,
+        "fn": 103,
+        "tn": 329591,
+        "precision": 0.8560747663551402,
+        "recall": 0.8163992869875223,
+        "f1": 0.8357664233576643,
+        "f2": 0.8240374235336453,
+        "false_positive_rate": 0.00023356831721610833,
+        "false_negative_rate": 0.1836007130124777,
+        "alert_rate": 0.0016200878784116478
+      }
+    }
+  },
+  "test_posthoc_all_candidates": {
+    "dummy_prior": {
+      "average_precision": 0.0038598644278853163,
+      "roc_auc": 0.5,
+      "prevalence": 0.0038598644278853163,
+      "n": 555719.0,
+      "positives": 2145.0
+    },
+    "logistic_regression": {
+      "average_precision": 0.29454857812013074,
+      "roc_auc": 0.9840685999382036,
+      "prevalence": 0.0038598644278853163,
+      "n": 555719.0,
+      "positives": 2145.0
+    },
+    "random_forest": {
+      "average_precision": 0.9117212618061774,
+      "roc_auc": 0.9972487204423676,
+      "prevalence": 0.0038598644278853163,
+      "n": 555719.0,
+      "positives": 2145.0
+    },
+    "xgboost": {
+      "average_precision": 0.955257442827662,
+      "roc_auc": 0.999252978039554,
+      "prevalence": 0.0038598644278853163,
+      "n": 555719.0,
+      "positives": 2145.0
+    },
+    "xgboost_weighted": {
+      "average_precision": 0.9568844427002636,
+      "roc_auc": 0.999116035326551,
+      "prevalence": 0.0038598644278853163,
+      "n": 555719.0,
+      "positives": 2145.0
+    }
+  },
+  "elapsed_seconds": 53.07391637499677
+}

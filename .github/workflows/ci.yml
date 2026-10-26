@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_USER: fraud
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: fraud_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U fraud -d fraud_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      FRAUD_TEST_DATABASE_URL: postgresql+psycopg://fraud:ci-only-password@localhost:5432/fraud_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.12"
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy ml/fraud_ml apps/api/fraud_api
+      - name: Migrations match models
+        env:
+          FRAUD_DATABASE_URL: ${{ env.FRAUD_TEST_DATABASE_URL }}
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini check
+          uv run alembic -c apps/api/alembic.ini downgrade base
+      - name: Tests (unit + integration; dataset tests skip without data)
+        run: uv run pytest -ra
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f infrastructure/docker/api.Dockerfile -t fraud-api:ci .

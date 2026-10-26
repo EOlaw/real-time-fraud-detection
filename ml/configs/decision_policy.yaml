@@ -1,0 +1,28 @@
+# Decision policy for the card-payments domain.
+#
+# The model estimates P(fraud); this policy maps that estimate to an action. Thresholds were
+# chosen from the model's *validation* operating points (ml/artifacts/<model>/evaluation.json),
+# never from the held-out test window. A policy is bound to one model version: the API refuses to
+# start if the loaded model does not match, so thresholds cannot silently drift onto a new model.
+version: card-policy-2026-10-26.1
+domain: card_payments
+
+# sandbox = decisions are simulated and never connected to money movement. "production" mode is
+# intentionally not supported until the policy goes through an approval process.
+mode: sandbox
+
+model:
+  name: card-fraud-xgb
+  version: 1.0.0
+
+# Lower bounds (inclusive) on the model score. low = [0, challenge_at).
+thresholds:
+  # ~1% validation alert rate (validation recall 0.982, precision 0.581)
+  challenge_at: 0.0122
+  # max-F2 threshold on validation
+  review_at: 0.2120
+  # ~0.25% validation alert rate (validation precision 1.000, recall 0.423). Sandbox only.
+  decline_at: 0.9985
+
+# Decision when features or inference fail (FRAUD_FAILURE_MODE=manual_review). Must not be allow.
+on_scoring_failure: review
