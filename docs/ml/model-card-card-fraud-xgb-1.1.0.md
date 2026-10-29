@@ -4,7 +4,16 @@
 `card-fraud-xgb@1.0.0` with `ml/configs/decision_policy.yaml`. This model has a bound candidate
 policy (`ml/configs/policies/card-fraud-xgb-1.1.0.yaml`) and passed every promotion gate in
 check-only mode, but **it has not been promoted**. Promotion is an explicit decision:
-`make promote CANDIDATE=card-fraud-xgb-1.1.0`.
+`make promote CANDIDATE=card-fraud-xgb-1.1.0 START=… END=… OPERATOR=…`.
+
+**Phase 9 gates (2026-10-28).** The candidate was checked against 20,000 held-out events with
+dataset labels:
+- **Passed:** integrity, contract, reproducibility, parity and performance (AP 0.940 vs incumbent
+  0.943, ECE 0.0004).
+- **Failed:** the **drift** gate (max feature PSI 0.317, `cust_txn_count_30d`, against its own
+  validation window). That shift is genuine in the synthetic data (seasonal volume).
+
+Promotion is therefore blocked until the drift has been reviewed.
 
 > **Synthetic data.** Trained and evaluated on Sparkov synthetic transactions. The fraud
 > episodes are much easier to detect than real fraud. These numbers show the pipeline works and

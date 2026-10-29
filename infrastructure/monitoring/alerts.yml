@@ -1,0 +1,49 @@
+# Operational alerts. Thresholds are starting points for this local setup, not SLOs derived from
+# production traffic (there is none); see docs/operations/monitoring.md.
+groups:
+  - name: fraud-operations
+    rules:
+      - alert: FraudApiDown
+        expr: up{job="fraud-api"} == 0
+        for: 1m
+        labels: {severity: page}
+        annotations: {summary: "API metrics endpoint unreachable"}
+      - alert: FraudApi5xxRate
+        expr: |
+          sum(rate(fraud_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(fraud_http_requests_total[5m])), 1e-9) > 0.02
+        for: 5m
+        labels: {severity: page}
+        annotations: {summary: "More than 2% of API requests fail with 5xx"}
+      - alert: FraudScoringLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(fraud_scoring_duration_seconds_bucket{stage="total"}[5m]))) > 0.25
+        for: 10m
+        labels: {severity: ticket}
+        annotations: {summary: "p95 server-side scoring time above 250 ms"}
+      - alert: FraudStreamLag
+        expr: max(fraud_stream_consumer_lag_seconds) > 60
+        for: 5m
+        labels: {severity: page}
+        annotations: {summary: "Oldest stream message older than 60 s (workers behind or down)"}
+      - alert: FraudDeadLetters
+        expr: max(fraud_stream_dead_letters) > 0
+        for: 1m
+        labels: {severity: ticket}
+        annotations: {summary: "Dead-lettered messages need investigation (fraud_api.stream.cli dlq-list)"}
+      - alert: FraudRedisUnavailable
+        expr: fraud_stream_up == 0
+        for: 1m
+        labels: {severity: page}
+        annotations: {summary: "Redis unreachable from the API"}
+      - alert: FraudDatabaseErrors
+        expr: sum(increase(fraud_db_errors_total[5m])) > 0
+        labels: {severity: ticket}
+        annotations: {summary: "Database errors in API, worker or monitoring"}
+      - alert: FraudDegradedScores
+        expr: |
+          sum(rate(fraud_scoring_decisions_total{outcome="degraded"}[10m]))
+            / clamp_min(sum(rate(fraud_scoring_decisions_total{outcome=~"scored|degraded"}[10m])), 1e-9) > 0.01
+        for: 10m
+        labels: {severity: page}
+        annotations: {summary: "More than 1% of scores degraded (model unavailable or failing)"}

@@ -26,12 +26,15 @@ flowchart LR
         HIST --> FEON[Online features<br/>same spec as offline]
         FEON --> INF[XGBoost inference]
         INF --> POL[Decision policy<br/>versioned, model-bound]
-        POL --> TXN[(PostgreSQL<br/>txn + assessment + audit<br/>one DB transaction)]
+        POL --> RUL[Tenant rules<br/>versioned, escalate only]
+        RUL --> TXN[(PostgreSQL<br/>txn + assessment +<br/>rule evaluations + audit<br/>one DB transaction)]
     end
 
     ART -->|read-only mount,<br/>hash verified| INF
-    TXN -.->|Designed: SSE| UI[Next.js command center]
-    TXN -.->|Designed| MON[Drift & performance<br/>monitoring]
+    TXN -->|SSE + REST| UI[Next.js command center]
+    TXN -->|monitoring job, aggregates only| MON[Drift & label-matured<br/>performance runs]
+    ART -->|reference profile:<br/>validation window| MON
+    API -->|/metrics, bearer token| PROM[Prometheus + Grafana<br/>local]
 ```
 
 ## 2. Component boundaries
@@ -45,11 +48,18 @@ flowchart LR
 | `ml/fraud_ml/training`, `evaluation` | Candidate models, chronological splits, rare-event metrics, bootstrap CIs | Implemented |
 | `ml/fraud_ml/models/artifact.py` | Pickle-free artifact format, hash + feature-contract verification | Implemented |
 | `apps/api/fraud_api` | Auth, RBAC, scoring service, decision policy, persistence, health | Implemented |
-| Rules engine | Declarative rules, versioned, audited; outcomes stored separately from ML scores | Designed (Phase 6) |
-| Event ingestion + simulator | Durable queue, retries, DLQ, replay controls | Designed (Phase 5) |
-| Case management | Cases, notes, dispositions, label provenance | Designed (Phase 8) |
-| Web command center | Next.js dashboard over real APIs | Designed (Phase 7) |
-| MLflow, drift monitoring, Prometheus/Grafana | Experiment tracking, model registry UI, operational metrics | Designed (Phase 9) |
+| `apps/api/fraud_api/scoring/batch.py` | `POST /fraud/batch`: per-item validation, in-batch de-duplication, `(event_time, transaction_id)` ordering, per-item transactions through the single-event service ([API](../api/scoring-api.md)) | Implemented (Phase 4) |
+| `apps/api/fraud_api/registry` | Model registry: activation at startup, `register-model` for candidates, read-only metadata endpoints | Implemented (Phase 4) |
+| `apps/api/fraud_api/rules` | Tenant rules: closed JSON grammar (no eval), immutable versions, atomic audited activation, escalate-only precedence, fail-safe errors, per-assessment trace ([rules engine](rules-engine.md)) | Implemented (Phase 6) |
+| `apps/api/fraud_api/insights/analytics.py` | Bounded-window aggregates: volume, decision/risk mix, alert and escalation rates, rule hits, latency ([definitions](rules-engine.md#analytics-definitions)) | Implemented (Phase 6) |
+| `apps/api/fraud_api/stream` | Redis Streams ingest, sharded workers, retries/DLQ, replay simulator, SSE feed ([streaming](streaming.md)) | Implemented (Phase 5) |
+| `apps/api/fraud_api/cases`, `labels` | Investigation cases (status machine, assignment, optimistic locking, append-only notes and history) and provenance-tracked, append-only fraud labels with supersession; label-matured performance kept apart from unlabeled signals ([API](../api/cases-labels-api.md), [labels](../ml/model-development-plan.md)) | Implemented (Phase 8) |
+| `apps/web` | Next.js command center over real APIs: transactions with decision and rule trace, analytics, rules, authenticated live feed ([command center](command-center.md)) | Implemented (Phase 7) |
+| `apps/api/fraud_api/observability` | Prometheus metrics with bounded labels (route templates, closed value sets), token-protected `/metrics`, scrape-time stream gauges, worker metrics on loopback ([operations](../operations/monitoring.md)) | Implemented (Phase 9) |
+| `apps/api/fraud_api/monitoring` | Reference profiles from each model's validation window, drift (PSI/KS, bootstrap and Wilson intervals), label-matured performance, idempotent persisted runs, promotion gates, audited `promote`/`rollback` CLI ([model monitoring](../ml/monitoring.md)) | Implemented (Phase 9) |
+| `infrastructure/monitoring` | Local Prometheus config, 8 alert rules, provisioned Grafana dashboard (Compose profile `monitoring`) | Implemented (Phase 9); no Alertmanager, no managed service |
+| `scripts/load_test.py` | Concurrent load test (burst/steady) for single, batch, ingest + workers and SSE, with database effect checks ([load testing](../operations/load-testing.md)) | Implemented (Phase 9) |
+| MLflow | Experiment tracking with a guard against transaction data (Phase 3) | Implemented; no hosted MLflow server |
 
 ## 3. Model inference pathway (implemented)
 
@@ -72,8 +82,10 @@ sequenceDiagram
     A->>DB: SELECT history WHERE org, customer, t-30d <= event_time < t (bounded, never truncated)
     A->>A: compute features (spec card-v1)
     A->>M: predict_proba(1×34)
-    A->>A: policy.decide(score) → risk level + sandbox decision + reasons
-    A->>DB: INSERT transaction, risk_assessment, audit_log (single commit; unique index resolves races)
+    A->>A: policy.decide(score) → risk level + policy decision + reasons
+    A->>DB: SELECT active rule versions (org)
+    A->>A: evaluate rules → final decision (never less strict than policy), trace
+    A->>DB: INSERT transaction, risk_assessment, rule_evaluations, audit_log (single commit; unique index resolves races)
     A-->>C: 200 decision response
 ```
 
@@ -89,44 +101,61 @@ Database failures are not "degraded scores": nothing can be persisted, so the re
 5xx and the client retries with the same `transaction_id` (idempotent). The DB also enforces
 `status='scored' OR decision<>'allow'` with a check constraint.
 
-## 4. Streaming design (Phase 5 — designed, not built)
+**Rules (Phase 6).** After the policy, the tenant's active rule versions are evaluated in the same
+transaction. Rules can only escalate (`allow < challenge < review < decline`; `flag` records a
+hit only), so `decision` is never less strict than `policy_decision`. A rule evaluation error
+escalates to at least the policy's `on_scoring_failure` and is recorded (`rules_status=error`).
+The stored `risk_score` and `policy_decision` are never changed by rules. Check constraints
+enforce these invariants in the database too. Details: [rules-engine.md](rules-engine.md).
 
-The required stages are ingestion → validation → features → inference → policy → persistence →
-dashboard update. Phase 1 executes all of them synchronously inside one request, which is the
-correctness baseline the streaming path must reproduce.
-
-**Broker choice: Redis Streams first, Kafka only if justified.**
-
-| Criterion | Redis Streams | Kafka |
-|---|---|---|
-| Throughput needed (replay demo: 10²–10³ ev/s) | Ample | Ample |
-| Delivery | At-least-once via consumer groups + `XACK`, `XPENDING`/`XAUTOCLAIM` for retries | At-least-once (exactly-once only inside Kafka transactions) |
-| Ordering | Per stream; partition by `customer_id` hash into N streams | Per partition |
-| Ops footprint locally | One container, also usable for cache/rate limiting | Broker + KRaft controller, heavier |
-| Retention/replay | Bounded by memory (`MAXLEN`) | Long, disk-based — better for true event sourcing |
-
-Kafka becomes justified if we need multi-day durable replay, multiple independent consumer
-applications, or sustained throughput beyond a single Redis node.
-
-**Delivery semantics (honest statement):** the pipeline will be *at-least-once delivery with
-idempotent effects*. Duplicate deliveries are absorbed by the `(organization_id, external_id)`
-unique constraint and payload hash, which Phase 1 already implements and tests (including
-concurrent duplicates). This is **not** exactly-once processing and will not be described as such.
+### Batch pathway (Phase 4)
 
 ```mermaid
 flowchart LR
-    SIM[Replay simulator<br/>rate, speed, pause, seed] -->|XADD events:{shard}| RS[(Redis Streams<br/>sharded by customer)]
-    RS --> W[Scoring workers<br/>consumer group]
-    W -->|same service code as API| DB[(PostgreSQL)]
-    W -->|after N failed attempts| DLQ[(Dead-letter stream)]
-    DB --> SSE[SSE /api/v1/events/stream]
-    W -. lag, pending, latency .-> PROM[Prometheus]
+    B[POST /fraud/batch<br/>≤ FRAUD_MAX_BATCH_SIZE] --> V[validate each item<br/>invalid → per-item status]
+    V --> D[in-batch duplicates<br/>identical → duplicate<br/>different → conflict]
+    D --> O[sort by event_time,<br/>transaction_id]
+    O --> L{for each item}
+    L --> S[score_transaction<br/>same path as /fraud/score]
+    S -->|commit per item| DB[(PostgreSQL)]
+    S -->|DB / unexpected error| X[item error;<br/>rest not_processed]
+    L --> R[response in input order<br/>+ fraud.batch_score audit]
 ```
 
-Ordering assumption: features for event *t* use history with `event_time < t` that **has already
-been persisted**. Sharding by customer keeps one customer's events on one consumer in order; late
-or out-of-order arrivals will see less history than the offline computation did. That skew will be
-measured (Phase 5 parity test) rather than assumed away.
+Ordering makes a customer's earlier batch events part of the history of their later events.
+Per-item commits keep the single-request semantics: idempotent retries, unique-index race
+resolution and one audit record per item. Measured on 20,000 real events: identical features,
+scores and decisions to sequential requests, at ≈ 1.5× the throughput (212.6 vs 137.5 events/s,
+single client). Full contract: [docs/api/scoring-api.md](../api/scoring-api.md).
+
+### Model registry
+
+`model_versions` holds every hash-verified version. Startup activation sets the loaded version to
+`active`, records its bound policy, and demotes any other active version of the same name.
+`fraud_api.cli register-model` records a candidate as `registered` with its policy. Promotion
+remains the gated `promote-model` step: changing `ml/artifacts/current` and the policy file,
+then restarting, is what activates a new version. The metadata endpoints only read.
+
+## 4. Event streaming (Phase 5 — implemented)
+
+Full behaviour, limits and commands: [streaming.md](streaming.md).
+
+* **Broker:** Redis Streams (7.4, AOF `everysec`), chosen over Kafka. Throughput needs are modest,
+  it is a single local container, and consumer groups with `XACK`/`XAUTOCLAIM` give at-least-once
+  delivery. Kafka would be justified by multi-day durable replay, many independent consumer
+  applications or throughput beyond one Redis node.
+* **Path:** `POST /api/v1/events` (validate, label, tenant from token, customer-hash shard, atomic
+  enqueue, backpressure) → one leased worker per shard → `score_transaction` (unchanged single
+  path) → after commit: feed publish + `XACK` + `XDEL` in one `MULTI` → SSE
+  `GET /api/v1/stream/assessments` (tenant-scoped, `Last-Event-ID` resume, retention `reset`).
+* **Semantics:** at-least-once delivery with idempotent database effects (not exactly-once).
+  Per-customer order is the ingest order. Late events are scored with the history stored so far
+  and flagged; events beyond the late tolerance are dead-lettered. Transient failures get
+  bounded retries with backoff, and poison or exhausted messages go to a replayable dead-letter
+  stream. Failures never produce an assessment, so never `allow`.
+* **Replay simulator** (`fraud_api.stream.simulator`): deterministic event order (replay from
+  parquet or seeded synthetic data), rate and event-time speed control, pause/resume, and
+  `source=replay` / `source=simulated` labels.
 
 ## 5. Persistence
 
@@ -142,13 +171,19 @@ idempotency and conflict detection, and a per-tenant advisory lock. Imported row
 history (`source` = `backfill`/`replay`/`simulated`) that the online features read; they are never
 labeled as live traffic.
 
-## 6. Frontend integration (Phase 7 — designed)
+Rule definitions and evaluations (Phase 6, migration `0003`) are append-only (trigger). The
+active version per rule key lives in `rule_activations`, changed only together with its audit
+record.
 
-Next.js + TanStack Query against the versioned REST API; live updates over SSE (one-way
-server→client fits a monitoring feed better than WebSockets and passes through proxies easily).
-Every chart reads an analytics endpoint backed by SQL over stored assessments — no client-side
-constants. Traffic is labeled by `source` (`live`/`replay`/`simulated`/`backfill`) and the UI must
-show that label.
+## 6. Frontend integration (Phase 7 — implemented)
+
+Next.js 15 (App Router, client components, no extra UI libraries) against the versioned REST
+API through a same-origin proxy (`next.config.ts` rewrites), so the bearer token never leaves the
+origin and the API needs no CORS. Live updates use SSE read with `fetch` + `ReadableStream`,
+because EventSource cannot send `Authorization`. Every chart reads an analytics endpoint backed by
+SQL over stored rows, with no client-side constants, and source labels are shown everywhere.
+Details, the feed client's reconnect semantics and the verification record:
+[command-center.md](command-center.md).
 
 ## 7. Operational monitoring strategy
 
@@ -157,10 +192,13 @@ show that label.
 | Structured JSON request logs with correlation ID, latency, status; secret/identifier redaction | API | Implemented |
 | Per-assessment timings (`features`, `inference`, `total`) stored with each decision | DB | Implemented |
 | `/health/live`, `/health/ready` (DB + model + policy) | API | Implemented |
-| Prometheus metrics: RPS, latency histograms (p50/p95/p99), error rate, queue depth, consumer lag | API, workers | Designed (Phase 9) |
-| Prediction drift (score PSI vs. validation), feature drift (PSI/KS per feature), alert rate | Batch job over `risk_assessments` | Designed (Phase 9) |
-| Label-matured precision/recall, kept separate from unlabeled drift signals | Batch job over labels | Designed (Phase 8/9) |
+| Prometheus metrics: request rate, latency histograms, 5xx, scoring stage time, decisions, degraded scores, batch/ingest/worker outcomes, stream backlog/pending/lag/DLQ, SSE connections, DB/Redis errors | API (`/metrics`), workers (`--metrics-port`) | Implemented (Phase 9) |
+| Alert rules and dashboard | Local Prometheus + Grafana | Implemented (Phase 9); alerts are not routed anywhere (no Alertmanager) |
+| Prediction drift (score PSI/KS vs. the model's validation window), feature drift (PSI/KS, missing and unseen categories), decision mix and alert rate, by source and tenant | `fraud_api.monitoring.cli run` over stored feature snapshots in `risk_assessments` | Implemented (Phase 9); scheduling is a loop or cron, no hosted scheduler |
+| Label-matured precision/recall/FPR, kept separate from unlabeled signals | `GET /fraud/insights/performance` (Phase 8) and persisted per monitoring run (Phase 9) | Implemented |
+| Promotion gates (integrity, policy binding, feature contract, reproducibility, parity, samples, drift, performance, unresolved monitoring alerts) | `fraud_api.monitoring.cli gates/promote/rollback` | Implemented (Phase 9) |
 
 Latency targets are engineering objectives, not guarantees: **p95 ≤ 50 ms server-side** for a
-single score at the documented hardware. The current measurement is in the README and
-`ml/reports/replay_*.json`.
+single score at the documented hardware. Sequential latency is in the README and
+`ml/reports/replay_*.json`; concurrent load results (synthetic data, one laptop) are in
+[load-testing.md](../operations/load-testing.md).

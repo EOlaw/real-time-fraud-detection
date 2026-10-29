@@ -90,6 +90,9 @@ def make_settings(db_url: str, model_dir: Path, policy_path: Path, **overrides: 
         model_dir=model_dir,
         policy_path=policy_path,
         failure_mode=overrides.pop("failure_mode", FailureMode.MANUAL_REVIEW),
+        # Settings also read .env; never let a developer's FRAUD_REDIS_URL leak into tests.
+        # Streaming tests opt in explicitly (Redis DB 15, unique key prefix).
+        redis_url=overrides.pop("redis_url", None),
         **overrides,
     )
 

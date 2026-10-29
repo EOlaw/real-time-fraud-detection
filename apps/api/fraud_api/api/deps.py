@@ -4,6 +4,8 @@ from collections.abc import Callable, Iterator
 from typing import Annotated
 
 import jwt
+import redis
+import redis.asyncio as aioredis
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from fraud_api.core.config import Settings
 from fraud_api.core.errors import APIError
 from fraud_api.core.security import Principal, Role, decode_token
 from fraud_api.scoring.service import ScoringContext
+from fraud_api.stream.keys import StreamKeys
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -62,3 +65,21 @@ def require_roles(*roles: Role) -> Callable[[Principal], Principal]:
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
+
+
+def get_stream_keys(settings: Annotated[Settings, Depends(get_settings)]) -> StreamKeys:
+    return StreamKeys(settings.stream_prefix, settings.stream_shards)
+
+
+def get_redis(request: Request) -> redis.Redis:
+    client = request.app.state.redis
+    if client is None:
+        raise APIError(503, "stream_unavailable", "Event streaming is not configured")
+    return client  # type: ignore[no-any-return]
+
+
+def get_redis_async(request: Request) -> aioredis.Redis:
+    client = request.app.state.redis_async
+    if client is None:
+        raise APIError(503, "stream_unavailable", "Event streaming is not configured")
+    return client  # type: ignore[no-any-return]

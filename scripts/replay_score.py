@@ -49,6 +49,12 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=5000)
     p.add_argument("--verify-every", type=int, default=0)
     p.add_argument("--out", type=Path, default=Path("ml/reports"))
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="1 = POST /fraud/score per event; >1 = POST /fraud/batch with N events",
+    )
     args = p.parse_args()
 
     password = os.environ.get("FRAUD_REPLAY_PASSWORD") or getpass.getpass("Password: ")
@@ -68,11 +74,8 @@ def main() -> None:
     token.raise_for_status()
     client.headers["Authorization"] = f"Bearer {token.json()['access_token']}"
 
-    rows: list[dict[str, Any]] = []
-    parity: list[dict[str, Any]] = []
-    started = time.perf_counter()
-    for idx, e in window.iterrows():
-        body = {
+    bodies = [
+        {
             "transaction_id": e["event_id"],
             "customer_id": e["customer_id"],
             "merchant_id": e["merchant_id"],
@@ -83,30 +86,58 @@ def main() -> None:
             "region": e["customer_region"],
             "source": "replay",
         }
-        t0 = time.perf_counter()
-        r = client.post("/api/v1/fraud/score", json=body)
-        client_ms = (time.perf_counter() - t0) * 1000
-        r.raise_for_status()
-        res = r.json()
-        rows.append({"label": int(e["is_fraud"]), "client_ms": client_ms, **res})
-        if idx in verify_idx and offline is not None and offline_scores is not None:
-            detail = client.get(f"/api/v1/fraud/predictions/{res['assessment_id']}").json()
-            pos = offline.index.get_loc(idx)
-            max_diff = 0.0
-            for name in NUMERIC_FEATURES:
-                a, b = offline.loc[idx, name], detail["features"][name]
-                if b is None or (isinstance(a, float) and math.isnan(a)):
-                    assert b is None and math.isnan(a), (idx, name, a, b)
-                    continue
-                max_diff = max(max_diff, abs(float(a) - float(b)) / max(1.0, abs(float(a))))
-            parity.append(
-                {
-                    "event_id": e["event_id"],
-                    "max_rel_feature_diff": max_diff,
-                    "score_diff": abs(float(offline_scores[pos]) - res["risk_score"]),
-                }
-            )
+        for _, e in window.iterrows()
+    ]
+    labels = window["is_fraud"].astype(int).tolist()
+    results: list[dict[str, Any]] = []
+    request_ms: list[float] = []
+    item_status: dict[str, int] = {}
+    started = time.perf_counter()
+    if args.batch_size <= 1:
+        for body in bodies:
+            t0 = time.perf_counter()
+            r = client.post("/api/v1/fraud/score", json=body)
+            request_ms.append((time.perf_counter() - t0) * 1000)
+            r.raise_for_status()
+            results.append(r.json())
+            item_status["scored"] = item_status.get("scored", 0) + 1
+    else:
+        for k in range(0, len(bodies), args.batch_size):
+            chunk = bodies[k : k + args.batch_size]
+            t0 = time.perf_counter()
+            r = client.post("/api/v1/fraud/batch", json={"items": chunk}, timeout=120.0)
+            request_ms.append((time.perf_counter() - t0) * 1000)
+            r.raise_for_status()
+            for it in r.json()["items"]:
+                item_status[it["status"]] = item_status.get(it["status"], 0) + 1
+                if it["result"] is None:
+                    raise RuntimeError(f"item {it['transaction_id']} not scored: {it['error']}")
+                results.append(it["result"])
     elapsed = time.perf_counter() - started
+
+    rows: list[dict[str, Any]] = [
+        {"label": lab, **res} for lab, res in zip(labels, results, strict=True)
+    ]
+    parity: list[dict[str, Any]] = []
+    for pos_in_window, idx in enumerate(window.index):
+        if idx not in verify_idx or offline is None or offline_scores is None:
+            continue
+        res = results[pos_in_window]
+        detail = client.get(f"/api/v1/fraud/predictions/{res['assessment_id']}").json()
+        pos = offline.index.get_loc(idx)
+        max_diff = 0.0
+        for name in NUMERIC_FEATURES:
+            a, b = offline.loc[idx, name], detail["features"][name]
+            if b is None or (isinstance(a, float) and math.isnan(a)):
+                assert b is None and math.isnan(a), (idx, name, a, b)
+                continue
+            max_diff = max(max_diff, abs(float(a) - float(b)) / max(1.0, abs(float(a))))
+        parity.append(
+            {
+                "max_rel_feature_diff": max_diff,
+                "score_diff": abs(float(offline_scores[pos]) - res["risk_score"]),
+            }
+        )
 
     df = pd.DataFrame(rows)
     scored = df[df["status"] == "scored"]
@@ -125,18 +156,21 @@ def main() -> None:
         "review_or_decline_recall": tp / max(int(scored["label"].sum()), 1),
         "note": "Replay starts after a 30-day backfill; window is a prefix of the test period, "
         "so these figures are a smoke check, not the model evaluation.",
+        "mode": "single" if args.batch_size <= 1 else f"batch of {args.batch_size}",
+        "requests": len(request_ms),
+        "item_status": item_status,
         "latency_ms": {
-            "client_round_trip": {
-                q: percentile(df["client_ms"].tolist(), v)
-                for q, v in (("p50", 50), ("p95", 95), ("p99", 99))
+            "client_round_trip_per_request": {
+                q: percentile(request_ms, v) for q, v in (("p50", 50), ("p95", 95), ("p99", 99))
             },
             "server_processing": {
                 q: percentile(df["processing_time_ms"].tolist(), v)
                 for q, v in (("p50", 50), ("p95", 95), ("p99", 99))
             },
-            "mean_client": statistics.fmean(df["client_ms"]),
+            "mean_client_per_request": statistics.fmean(request_ms),
         },
-        "throughput_rps_sequential_single_client": len(df) / elapsed,
+        "events_per_second_single_client": len(df) / elapsed,
+        "elapsed_seconds": elapsed,
         "parity_checks": {
             "checked": len(parity),
             "max_rel_feature_diff": max((x["max_rel_feature_diff"] for x in parity), default=None),
@@ -148,7 +182,7 @@ def main() -> None:
             "release": platform.release(),
             "python": platform.python_version(),
             "setup": "uvicorn 1 worker + PostgreSQL 17 (Docker) on the same host; "
-            "sequential requests, 1 client, keep-alive",
+            "sequential requests (one batch at a time), 1 client, keep-alive",
         },
     }
     args.out.mkdir(parents=True, exist_ok=True)

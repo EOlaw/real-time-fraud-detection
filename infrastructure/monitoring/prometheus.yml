@@ -1,0 +1,28 @@
+# Local Prometheus for the fraud platform (docker compose --profile monitoring up -d).
+# Targets run on the host: the API (`make api`, :8000) and stream workers started with
+# `--metrics-port 9101` (and 9102, ... for more workers). Docker Desktop reaches the host's
+# loopback through host.docker.internal; on Linux add `extra_hosts: host-gateway` (see compose).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: fraud-api
+    metrics_path: /metrics
+    # /metrics is disabled unless FRAUD_METRICS_TOKEN is set; Prometheus sends it from a file
+    # mounted read-only (infrastructure/monitoring/secrets/metrics_token, git-ignored).
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/metrics_token
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels: {service: api}
+
+  - job_name: fraud-worker
+    # Worker metrics listen on 127.0.0.1 only and carry no event data.
+    static_configs:
+      - targets: ["host.docker.internal:9101", "host.docker.internal:9102"]
+        labels: {service: stream-worker}

@@ -13,57 +13,20 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
 
 from fraud_api.api.routes import health, v1
 from fraud_api.core.config import Settings, get_settings
 from fraud_api.core.errors import install_error_handlers
 from fraud_api.core.logging import configure_logging, correlation_id_var, get_logger
-from fraud_api.db.models import ModelVersion
 from fraud_api.db.session import make_engine, make_session_factory
-from fraud_api.scoring.policy import DecisionPolicy
-from fraud_api.scoring.service import ScoringContext
-from fraud_ml.models.artifact import ArtifactError, LoadedModel, load_artifact
+from fraud_api.observability.endpoint import record_http
+from fraud_api.observability.endpoint import router as metrics_router
+from fraud_api.observability.metrics import MODEL_INFO
+from fraud_api.registry.service import register_model as register_model  # re-export
+from fraud_api.scoring.context import build_scoring_context
 
 log = get_logger(__name__)
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9\-]{8,64}$")
-
-
-def register_model(session: Session, model: LoadedModel) -> uuid.UUID:
-    """Record the serving model. Re-using a name@version for different bytes is refused.
-
-    Uses INSERT ... ON CONFLICT DO NOTHING so concurrent workers starting against a fresh database
-    do not race on the unique (name, version) constraint.
-    """
-    session.execute(
-        pg_insert(ModelVersion)
-        .values(
-            id=uuid.uuid4(),
-            name=model.name,
-            version=model.version,
-            artifact_sha256=model.sha256,
-            dataset_version=model.manifest.get("dataset_version"),
-            manifest=model.manifest,
-            status="active",
-        )
-        .on_conflict_do_nothing(constraint="uq_model_versions_name_version")
-    )
-    existing = session.scalars(
-        select(ModelVersion).where(
-            ModelVersion.name == model.name, ModelVersion.version == model.version
-        )
-    ).one()
-    if existing.artifact_sha256 != model.sha256:
-        session.rollback()
-        raise ArtifactError(
-            f"{model.name}@{model.version} is registered with a different "
-            "artifact hash; bump the model version instead of overwriting"
-        )
-    existing.status = "active"
-    session.commit()
-    return existing.id
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -74,36 +37,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = make_engine(settings)
         session_factory = make_session_factory(engine)
-        policy = DecisionPolicy.load(settings.policy_path)  # invalid policy: fail fast
-        model: LoadedModel | None
-        model_version_id: uuid.UUID | None = None
-        try:
-            model = load_artifact(settings.model_dir)
-        except (ArtifactError, OSError) as exc:
-            # Start, but report not-ready; scoring follows FRAUD_FAILURE_MODE.
-            log.error("model_load_failed", error=str(exc), model_dir=str(settings.model_dir))
-            model = None
-        if model is not None:
-            policy.check_model(model.name, model.version)  # mismatch: fail fast
-            with session_factory() as session:
-                model_version_id = register_model(session, model)
-            log.info(
-                "model_loaded",
-                model=model.name,
-                version=model.version,
-                sha256=model.sha256[:12],
-                policy=policy.version,
-            )
         app.state.settings = settings
         app.state.session_factory = session_factory
-        app.state.scoring = ScoringContext(
-            model=model,
-            model_version_id=model_version_id,
-            policy=policy,
-            failure_mode=settings.failure_mode,
-            max_history_rows=settings.max_history_rows,
-        )
+        app.state.scoring = build_scoring_context(settings, session_factory)
+        if app.state.scoring.model is not None:
+            m = app.state.scoring.model
+            MODEL_INFO.labels(m.name, m.version, app.state.scoring.policy.version).set(1)
+        app.state.redis = None
+        app.state.redis_async = None
+        if settings.redis_url is not None:
+            # Short timeouts: a slow or absent Redis must not stall synchronous scoring requests
+            # (feed publishing from those paths is best effort).
+            import redis
+            import redis.asyncio as aioredis
+
+            url = settings.redis_url.get_secret_value()
+            app.state.redis = redis.Redis.from_url(
+                url, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0
+            )
+            # SSE blocks on XREAD for up to one heartbeat interval, so the read timeout must be
+            # longer than that (redis-py's async default of 5 s would abort idle feeds).
+            app.state.redis_async = aioredis.Redis.from_url(
+                url,
+                decode_responses=True,
+                socket_connect_timeout=2.0,
+                socket_timeout=settings.sse_heartbeat_seconds + 10.0,
+            )
         yield
+        if app.state.redis is not None:
+            app.state.redis.close()
+            await app.state.redis_async.aclose()
         engine.dispose()
 
     app = FastAPI(
@@ -138,7 +101,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return response
 
+    app.middleware("http")(record_http)
     app.include_router(health)
+    app.include_router(metrics_router)
     app.include_router(v1)
     return app
 

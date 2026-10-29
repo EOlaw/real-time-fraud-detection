@@ -28,6 +28,8 @@ dependencies = [
     "optuna>=4.2",
     "imbalanced-learn>=0.13",
     "mlflow>=3.0",
+    "redis>=5.2",
+    "prometheus-client>=0.21",
 ]
 
 [dependency-groups]
@@ -66,6 +68,8 @@ ignore = ["S101"]  # assert is fine in tests and invariants
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S311"]
 "apps/api/migrations/**" = ["E501"]
+# Operator load-test tool: runs fixed argv (psql, ps, docker); random.Random only shuffles load.
+"scripts/load_test.py" = ["S603", "S607", "S311"]
 
 [tool.mypy]
 python_version = "3.12"

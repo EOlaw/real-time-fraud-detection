@@ -17,6 +17,14 @@ same 30-day lookback the offline features had.
 
 Exit status: 0 on success, 1 when the import is refused or rolled back (nothing written).
 
+    uv run python -m fraud_api.cli register-model \
+        --artifact ml/artifacts/card-fraud-xgb-1.1.0 \
+        --policy ml/configs/policies/card-fraud-xgb-1.1.0.yaml
+
+``register-model`` records a hash-verified artifact (and the policy bound to it) in the model
+registry with status ``registered`` so ``GET /api/v1/models`` can show it as a candidate. It never
+activates or promotes; only an API instance that loads a model marks it ``active``.
+
     uv run python -m fraud_api.cli promote-model \
         --artifact ml/artifacts/card-fraud-xgb-1.1.0 \
         --policy ml/configs/policies/card-fraud-xgb-1.1.0.yaml [--apply]
@@ -49,7 +57,7 @@ from fraud_api.db.importer import (
     import_transactions,
     load_canonical,
 )
-from fraud_api.db.models import AuditLog, Organization, User
+from fraud_api.db.models import AuditLog, ModelVersion, Organization, User
 from fraud_api.db.session import make_engine, make_session_factory
 
 
@@ -84,6 +92,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--end", type=datetime.fromisoformat, required=True)
     p.add_argument("--statement-timeout-s", type=int, default=600)
     p.set_defaults(source="backfill")
+    p = sub.add_parser(
+        "import-dataset-labels",
+        help="record the dataset's is_fraud as source=dataset labels for stored transactions",
+    )
+    p.add_argument("--org", required=True)
+    p.add_argument("--data", type=Path, required=True)
+    p.add_argument("--start", type=datetime.fromisoformat, required=True)
+    p.add_argument("--end", type=datetime.fromisoformat, required=True)
+    p = sub.add_parser("register-model", help="register a candidate version (never activates)")
+    p.add_argument("--artifact", type=Path, required=True)
+    p.add_argument("--policy", type=Path, help="decision policy bound to this version")
     p = sub.add_parser("promote-model", help="run promotion gates (and --apply to promote)")
     p.add_argument("--artifact", type=Path, required=True)
     p.add_argument("--policy", type=Path, required=True)
@@ -96,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.cmd == "promote-model":  # needs no database
-        from fraud_api.promotion import apply_promotion, check_promotion
+        from fraud_api.promotion import check_promotion
 
         gates = check_promotion(args.artifact, args.policy, args.data, args.parity_sample)
         for g in gates:
@@ -105,15 +124,15 @@ def main(argv: list[str] | None = None) -> None:
             print("promotion gates failed; nothing changed", file=sys.stderr)
             sys.exit(1)
         if args.apply:
+            # Phase 9: promotion also needs evidence gates (stored data, labels, drift and
+            # monitoring), an operator and an audit record. Refuse the artifact-only path.
             print(
-                apply_promotion(
-                    args.artifact,
-                    args.policy,
-                    args.current_link,
-                    args.active_policy,
-                    args.archive_dir,
-                )
+                "promote-model --apply is retired: these are only the artifact gates. Use "
+                "`python -m fraud_api.monitoring.cli promote ... --apply --operator NAME`, "
+                "which runs every gate and writes an audit record. Nothing changed.",
+                file=sys.stderr,
             )
+            sys.exit(2)
         else:
             print("all gates passed; nothing changed (re-run with --apply to promote)")
         return
@@ -147,6 +166,32 @@ def main(argv: list[str] | None = None) -> None:
             )
             session.commit()
             print(f"created {args.role} user {user.email} ({user.id})")
+        elif args.cmd == "register-model":
+            from fraud_api.registry.service import register_model
+            from fraud_api.scoring.policy import DecisionPolicy
+            from fraud_ml.models.artifact import ArtifactError, load_artifact
+
+            try:
+                model = load_artifact(args.artifact)
+                policy = DecisionPolicy.load(args.policy) if args.policy else None
+                mv_id = register_model(session, model, policy, activate=False)
+            except (ArtifactError, ValueError, OSError) as exc:
+                print(f"registration failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            mv = session.get(ModelVersion, mv_id)
+            assert mv is not None
+            print(
+                json.dumps(
+                    {
+                        "id": str(mv.id),
+                        "model": f"{mv.name}@{mv.version}",
+                        "status": mv.status,
+                        "artifact_sha256": mv.artifact_sha256,
+                        "bound_policy": (mv.bound_policy or {}).get("version"),
+                    },
+                    indent=2,
+                )
+            )
         elif args.cmd in ("import-transactions", "load-history"):
             try:
                 df, manifest = load_canonical(args.data, args.start, args.end)
@@ -171,6 +216,16 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 sys.exit(1)
             print(json.dumps(result.to_dict(), indent=2))
+        elif args.cmd == "import-dataset-labels":
+            from fraud_api.labels.service import import_dataset_labels
+
+            try:
+                df, manifest = load_canonical(args.data, args.start, args.end)
+            except TransactionImportError as exc:
+                print(f"import failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            org = _org(session, args.org)
+            print(json.dumps(import_dataset_labels(session, org.id, df, manifest), indent=2))
 
 
 if __name__ == "__main__":

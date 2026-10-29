@@ -109,12 +109,82 @@ The unweighted model is already well calibrated on test (ECE 0.00017). Post-hoc 
 added only if a future model degrades calibration — fitting it on validation would contaminate
 threshold selection.
 
-## 8. Delayed labels, label bias, drift ⏳
+## 8. Delayed labels, label bias, drift (labels ✅ Phase 8; drift ✅ Phase 9)
 
-* Training labels will be cut off at `train_end − label_maturity` once label timestamps exist
-  (Phase 8 case outcomes carry `labeled_at` and provenance).
-* Analyst dispositions are *labels with provenance*, not automatic ground truth: "inconclusive" is
-  excluded, and reviewed-only populations are biased toward high scores (selection bias), so
-  retraining will weight or sample accordingly.
-* Monitoring will separate unlabeled signals (score/feature drift) from label-matured performance.
-  Drift triggers a *retraining recommendation*, never automatic promotion.
+**Two different kinds of labels exist, and they are not interchangeable.**
+
+* **Dataset labels** are the synthetic dataset's `is_fraud` column. The models in this repository
+  were trained and evaluated on them (Phases 1 and 3). `fraud_api.cli import-dataset-labels`
+  can record them in `fraud_labels` with `source = 'dataset'` and the dataset version in
+  `provenance`. They are synthetic: generator artifacts make them easier to predict than real
+  fraud, and they carry no information about when a real outcome would have become known.
+* **Analyst dispositions, chargebacks and customer reports** (`analyst_review`, `chargeback`,
+  `customer_report`) are *observations with provenance*:
+  - who recorded them (`labeled_by`), and on which case;
+  - how confident they are (`confirmed` or `probable`);
+  - when the outcome became known (`labeled_at`), which differs from `recorded_at`.
+
+  They are **not automatically ground truth**. Analysts review a *selected* population (alerts
+  and cases), so their labels are biased toward high scores. Chargebacks skew toward fraud.
+  `inconclusive` means "not known".
+
+**History is append-only.** A correction is a new label that supersedes the previous one, so
+earlier labels stay queryable. "What did we know at time T" is answered by the labels with
+`labeled_at ≤ T` that were not superseded by another label known by T.
+
+**Label maturity.** A transaction's label is only meaningful once enough time has passed for its
+outcome to be known (real chargebacks arrive weeks later). Label-matured performance
+(`GET /api/v1/fraud/insights/performance`) therefore:
+
+1. selects a cohort by transaction **event time** (the window);
+2. drops events after `as_of − maturity_days` (default `FRAUD_LABEL_MATURITY_DAYS = 30`) as
+   **immature**;
+3. uses only labels known at `as_of` (point in time);
+4. counts only current `fraud` / `legitimate` labels with `confirmed` confidence. `probable`
+   labels are included only with `include_probable=true`; `inconclusive` labels and unlabeled
+   transactions are **excluded and counted**, never treated as legitimate;
+5. reports precision, recall among labeled fraud, and false-positive rate among labeled
+   legitimate, each with numerator and denominator. Final (rule-adjusted) and policy decisions
+   are reported separately, together with label coverage and label sources.
+
+Because the labeled subset is selected, these are **not population metrics**: recall here is not
+the fraud capture rate, and precision over analyst-reviewed alerts does not transfer to unreviewed
+traffic. The response carries this caveat. Unlabeled signals (alert rate and mean score over all
+assessments) are reported in a separate block.
+
+**Training (future phases).** Retraining on platform labels will cut labels off at
+`train_end − label_maturity`, use only labels known at the training cutoff, and weight or sample
+for selection bias. **No model was retrained in Phase 8**, and labels are never model inputs or
+features.
+
+**Drift ✅ (Phase 9).** Implemented in `fraud_api.monitoring`; full method in
+[monitoring.md](monitoring.md).
+- **Reference:** each model's own validation window and dataset version, checked against the
+  manifest's row count and artifact hash.
+- **Current window:** compared on the feature snapshots stored with each assessment.
+- **Statistics:** score PSI/KS (with a bootstrap interval), feature PSI/KS with explicit missing and
+  unseen-category bins, policy decision mix and alert rate (Wilson intervals), by source and per
+  tenant.
+- **Kept separate:** label-matured performance uses the same maturity and cutoff rules as above,
+  is stored as separate `labeled` rows with the selection-bias caveat, and needs ≥ 200 usable
+  labels and ≥ 20 fraud.
+- **Advisory only:** drift **recommends** `review` or `retraining_review` and never promotes or
+  retrains automatically.
+- **Promotion gates** add the following checks to the Phase 3 gates, and promotion stays an
+  explicit, audited, reversible CLI action:
+  - feature contract and reproducibility;
+  - minimum samples;
+  - candidate drift on recent traffic;
+  - labeled AP and calibration against the incumbent;
+  - no unacknowledged monitoring alerts.
+
+**Real-data finding (synthetic data).** Model `1.0.0` was run on 20,000 held-out events
+(2020-06-21 to 06-28) against its validation window (2020-03-01 to 2020-06-21):
+- **Score:** stable (PSI 0.006).
+- **Features:** `cust_txn_count_30d` drifted (PSI 0.32, alert). Mean 30-day counts rose from 96
+  to 120, matching the generator's seasonal volume increase.
+- **Recommendation:** `retraining_review`.
+- **1.1.0 gates:** for the same reason, 1.1.0 fails the drift gate. Its other evidence gates pass
+  (AP 0.940 vs incumbent 0.943, within the 0.02 tolerance).
+
+It was not promoted.

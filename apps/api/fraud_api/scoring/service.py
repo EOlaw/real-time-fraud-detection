@@ -1,9 +1,14 @@
 """Real-time scoring pipeline.
 
-idempotency -> point-in-time history -> features -> model -> policy -> persist.
+idempotency -> point-in-time history -> features -> model -> policy -> tenant rules -> persist.
 
-Persistence of the transaction, its assessment and the audit record happens in a single database
-transaction, so a stored transaction always has exactly one assessment.
+Persistence of the transaction, its assessment, its rule evaluations and the audit record happens
+in a single database transaction, so a stored transaction always has exactly one assessment and
+the stored decision always agrees with its stored rule trace. This function is the only scoring
+path: ``POST /fraud/score``, ``POST /fraud/batch`` and the stream workers all call it.
+
+Rules see the model score and policy decision as inputs and can only escalate the decision; the
+stored ``risk_score`` and ``policy_decision`` are never changed by them (see fraud_api.rules).
 """
 
 from __future__ import annotations
@@ -22,9 +27,20 @@ from fraud_api.core.config import FailureMode
 from fraud_api.core.errors import APIError
 from fraud_api.core.logging import get_logger
 from fraud_api.db.models import AuditLog, ModelVersion, RiskAssessment, Transaction
+from fraud_api.observability.metrics import observe_scoring
+from fraud_api.rules.engine import apply_rules
+from fraud_api.rules.service import (
+    build_facts,
+    load_active_rules,
+    persist_evaluations,
+    rule_reasons,
+    stored_summary,
+    summary_from_result,
+)
 from fraud_api.scoring.policy import DecisionOutcome, DecisionPolicy
 from fraud_api.scoring.schemas import (
     PredictionDetail,
+    RulesSummary,
     ScoreRequest,
     ScoreResponse,
     utcnow,
@@ -63,6 +79,9 @@ def _fetch_history(
             Transaction.event_time >= t - timedelta(microseconds=MAX_LOOKBACK_US),
             Transaction.event_time < t,
         )
+        # Deterministic order (unique within a tenant) makes the floating-point window sums
+        # bit-reproducible whichever path or plan reads the history.
+        .order_by(Transaction.event_time, Transaction.external_id)
         .limit(limit + 1)
     ).all()
     if len(rows) > limit:
@@ -76,7 +95,11 @@ def _json_features(features: dict[str, float | str]) -> dict[str, float | str | 
 
 
 def _to_response(
-    txn: Transaction, ra: RiskAssessment, model: ModelVersion | None, replay: bool
+    txn: Transaction,
+    ra: RiskAssessment,
+    model: ModelVersion | None,
+    replay: bool,
+    rules: RulesSummary,
 ) -> ScoreResponse:
     return ScoreResponse(
         assessment_id=ra.id,
@@ -85,6 +108,8 @@ def _to_response(
         risk_score=ra.risk_score,
         risk_level=ra.risk_level,
         decision=ra.decision,
+        policy_decision=ra.policy_decision,
+        rules=rules,
         decision_mode=ra.decision_mode,
         reasons=ra.reasons,
         model_name=model.name if model else None,
@@ -123,7 +148,9 @@ def _existing(
             "idempotency_conflict",
             "transaction_id was already submitted with a different payload",
         )
-    return _to_response(txn, ra, mv, replay=True)
+    # The original decision and its stored rule trace, whatever the rules are now.
+    rules, _ = stored_summary(session, ra.id, ra.rules_status)
+    return _to_response(txn, ra, mv, replay=True, rules=rules)
 
 
 def score_transaction(
@@ -137,6 +164,7 @@ def score_transaction(
     started = time.perf_counter()
     payload_hash = req.payload_sha256()
     if (prior := _existing(session, org_id, req, payload_hash)) is not None:
+        observe_scoring(prior.status, prior.decision, True, False, {})
         return prior
 
     channel = derive_channel(req.category)
@@ -177,6 +205,27 @@ def score_transaction(
             ) from exc
         score, outcome = None, ctx.policy.on_failure(reason)
 
+    # Tenant rules: active versions read inside this transaction; evaluation errors escalate
+    # (never allow). A database error here propagates like any other (5xx, caller retries).
+    t2 = time.perf_counter()
+    rules = load_active_rules(session, org_id)
+    facts = build_facts(
+        amount=req.amount,
+        category=req.category,
+        channel=channel,
+        region=req.region,
+        merchant_id=req.merchant_id,
+        customer_id=req.customer_id,
+        source=req.source.value,
+        status="scored" if score is not None else "degraded",
+        risk_score=score,
+        risk_level=outcome.risk_level.value,
+        policy_decision=outcome.decision.value,
+        features=features,
+    )
+    rules_result = apply_rules(rules, facts, outcome.decision.value, ctx.policy.on_scoring_failure)
+    timings["rules"] = (time.perf_counter() - t2) * 1000
+
     txn = Transaction(
         organization_id=org_id,
         external_id=req.transaction_id,
@@ -212,9 +261,11 @@ def score_transaction(
         status="scored" if score is not None else "degraded",
         risk_score=score,
         risk_level=outcome.risk_level.value,
-        decision=outcome.decision.value,
+        decision=rules_result.decision,
+        policy_decision=outcome.decision.value,
+        rules_status=rules_result.status,
         decision_mode=ctx.policy.mode,
-        reasons=outcome.reasons,
+        reasons=[*outcome.reasons, *rule_reasons(rules_result)],
         policy_version=ctx.policy.version,
         features=_json_features(features) if features is not None else None,
         timings_ms=timings,
@@ -223,6 +274,8 @@ def score_transaction(
     )
     session.add(ra)
     session.flush()
+    persist_evaluations(session, org_id, ra.id, rules_result)
+    decided_by = rules_result.decided_by
     session.add(
         AuditLog(
             organization_id=org_id,
@@ -230,13 +283,25 @@ def score_transaction(
             action="fraud.score",
             resource_type="risk_assessment",
             resource_id=str(ra.id),
-            details={"decision": ra.decision, "status": ra.status, "source": txn.source},
+            details={
+                "decision": ra.decision,
+                "policy_decision": ra.policy_decision,
+                "rules_status": ra.rules_status,
+                "rules_evaluated": len(rules_result.evaluations),
+                "rules_matched": sum(e.outcome == "matched" for e in rules_result.evaluations),
+                "decided_by": (
+                    f"{decided_by.rule.rule_key}@v{decided_by.rule.version}" if decided_by else None
+                ),
+                "status": ra.status,
+                "source": txn.source,
+            },
             correlation_id=correlation_id,
         )
     )
     session.commit()
+    observe_scoring(ra.status, ra.decision, False, ra.decision != ra.policy_decision, dict(timings))
     mv = session.get(ModelVersion, ctx.model_version_id) if ra.model_version_id else None
-    return _to_response(txn, ra, mv, replay=False)
+    return _to_response(txn, ra, mv, replay=False, rules=summary_from_result(rules_result))
 
 
 def get_prediction(
@@ -251,5 +316,11 @@ def get_prediction(
     if row is None:
         return None
     txn, ra, mv = row
-    base = _to_response(txn, ra, mv, replay=False)
-    return PredictionDetail(**base.model_dump(), features=ra.features, timings_ms=ra.timings_ms)
+    rules, evaluations = stored_summary(session, ra.id, ra.rules_status)
+    base = _to_response(txn, ra, mv, replay=False, rules=rules)
+    return PredictionDetail(
+        **base.model_dump(),
+        features=ra.features,
+        timings_ms=ra.timings_ms,
+        rule_evaluations=evaluations,
+    )
